@@ -54,6 +54,7 @@ import java.util.Set;
 import static org.apache.paimon.CoreOptions.createCommitUser;
 import static org.apache.paimon.flink.FlinkConnectorOptions.END_INPUT_WATERMARK;
 import static org.apache.paimon.flink.FlinkConnectorOptions.PRECOMMIT_COMPACT;
+import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_COMMITTER_COORDINATOR_OPERATOR_ENABLED;
 import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_AUTO_TAG_FOR_SAVEPOINT;
 import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_COMMITTER_CPU;
 import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_COMMITTER_MEMORY;
@@ -199,7 +200,8 @@ public abstract class FlinkSink<T> implements Serializable {
         Options options = Options.fromMap(table.options());
         OneInputStreamOperatorFactory<Committable, Committable> committerOperator =
                 createCommitterOperatorFactory(
-                        streamingCheckpointEnabled, commitUser, options.get(END_INPUT_WATERMARK));
+                        streamingCheckpointEnabled, commitUser, options.get(END_INPUT_WATERMARK),
+                        options.get(SINK_COMMITTER_COORDINATOR_OPERATOR_ENABLED));
 
         if (options.get(SINK_AUTO_TAG_FOR_SAVEPOINT)) {
             committerOperator =
@@ -294,8 +296,10 @@ public abstract class FlinkSink<T> implements Serializable {
             createCommitterOperatorFactory(
                     boolean streamingCheckpointEnabled,
                     String commitUser,
-                    @Nullable Long endInputWatermark) {
+                    @Nullable Long endInputWatermark,
+                    boolean sinkCommitterCoordinatorOperatorEnabled) {
         return new CommitterOperatorFactory<>(
+                sinkCommitterCoordinatorOperatorEnabled,
                 streamingCheckpointEnabled,
                 true,
                 commitUser,
