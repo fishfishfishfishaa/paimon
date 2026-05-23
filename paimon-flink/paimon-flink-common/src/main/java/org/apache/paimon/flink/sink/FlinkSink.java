@@ -32,6 +32,7 @@ import org.apache.flink.api.common.RuntimeExecutionMode;
 import org.apache.flink.api.common.operators.SlotSharingGroup;
 import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.api.java.typeutils.EitherTypeInfo;
+import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.ExecutionOptions;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.CheckpointingMode;
@@ -54,8 +55,8 @@ import java.util.Set;
 import static org.apache.paimon.CoreOptions.createCommitUser;
 import static org.apache.paimon.flink.FlinkConnectorOptions.END_INPUT_WATERMARK;
 import static org.apache.paimon.flink.FlinkConnectorOptions.PRECOMMIT_COMPACT;
-import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_COMMITTER_COORDINATOR_OPERATOR_ENABLED;
 import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_AUTO_TAG_FOR_SAVEPOINT;
+import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_COMMITTER_COORDINATOR_OPERATOR_ENABLED;
 import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_COMMITTER_CPU;
 import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_COMMITTER_MEMORY;
 import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_COMMITTER_OPERATOR_CHAINING;
@@ -133,14 +134,17 @@ public abstract class FlinkSink<T> implements Serializable {
                 input.transform(
                         (writeOnly ? WRITER_WRITE_ONLY_NAME : WRITER_NAME) + " : " + table.name(),
                         new CommittableTypeInfo(),
-                        createWriteOperatorFactory(
+                        createWriteCoordinatorFactory(
                                 StoreSinkWrite.createWriteProvider(
                                         table,
                                         env.getCheckpointConfig(),
                                         isStreaming,
                                         ignorePreviousFiles,
                                         hasSinkMaterializer(input)),
-                                commitUser));
+                                commitUser,
+                                isStreaming && env.getCheckpointConfig().isCheckpointingEnabled(),
+                                env.getConfiguration()
+                                        .get(CheckpointingOptions.CHECKPOINTS_DIRECTORY)));
         if (parallelism == null) {
             forwardParallelism(written, input);
         } else {
@@ -196,12 +200,14 @@ public abstract class FlinkSink<T> implements Serializable {
         if (streamingCheckpointEnabled) {
             assertStreamingConfiguration(env);
         }
-
         Options options = Options.fromMap(table.options());
+        if (options.get(SINK_COMMITTER_COORDINATOR_OPERATOR_ENABLED)) {
+            return written.sinkTo(new DiscardingSink<>()).name("end").setParallelism(1);
+        }
+
         OneInputStreamOperatorFactory<Committable, Committable> committerOperator =
                 createCommitterOperatorFactory(
-                        streamingCheckpointEnabled, commitUser, options.get(END_INPUT_WATERMARK),
-                        options.get(SINK_COMMITTER_COORDINATOR_OPERATOR_ENABLED));
+                        streamingCheckpointEnabled, commitUser, options.get(END_INPUT_WATERMARK));
 
         if (options.get(SINK_AUTO_TAG_FOR_SAVEPOINT)) {
             committerOperator =
@@ -296,10 +302,8 @@ public abstract class FlinkSink<T> implements Serializable {
             createCommitterOperatorFactory(
                     boolean streamingCheckpointEnabled,
                     String commitUser,
-                    @Nullable Long endInputWatermark,
-                    boolean sinkCommitterCoordinatorOperatorEnabled) {
+                    @Nullable Long endInputWatermark) {
         return new CommitterOperatorFactory<>(
-                sinkCommitterCoordinatorOperatorEnabled,
                 streamingCheckpointEnabled,
                 true,
                 commitUser,
@@ -310,6 +314,14 @@ public abstract class FlinkSink<T> implements Serializable {
 
     protected abstract OneInputStreamOperatorFactory<T, Committable> createWriteOperatorFactory(
             StoreSinkWrite.Provider writeProvider, String commitUser);
+
+    protected OneInputStreamOperatorFactory<T, Committable> createWriteCoordinatorFactory(
+            StoreSinkWrite.Provider writeProvider,
+            String commitUser,
+            boolean isStreaming,
+            String checkpointDir) {
+        return createWriteOperatorFactory(writeProvider, commitUser);
+    }
 
     protected abstract Committer.Factory<Committable, ManifestCommittable> createCommitterFactory();
 

@@ -35,8 +35,6 @@ import static org.apache.paimon.utils.Preconditions.checkNotNull;
 public class CommitterOperatorFactory<CommitT, GlobalCommitT>
         extends AbstractStreamOperatorFactory<CommitT>
         implements OneInputStreamOperatorFactory<CommitT, CommitT> {
-    protected final boolean sinkCommitterCoordinatorOperatorEnabled;
-
     protected final boolean streamingCheckpointEnabled;
 
     /** Whether to check the parallelism while runtime. */
@@ -85,25 +83,6 @@ public class CommitterOperatorFactory<CommitT, GlobalCommitT>
             Committer.Factory<CommitT, GlobalCommitT> committerFactory,
             CommittableStateManager<GlobalCommitT> committableStateManager,
             Long endInputWatermark) {
-        this(
-                false,
-                streamingCheckpointEnabled,
-                forceSingleParallelism,
-                initialCommitUser,
-                committerFactory,
-                committableStateManager,
-                null);
-    }
-
-    public CommitterOperatorFactory(
-            boolean sinkCommitterCoordinatorOperatorEnabled,
-            boolean streamingCheckpointEnabled,
-            boolean forceSingleParallelism,
-            String initialCommitUser,
-            Committer.Factory<CommitT, GlobalCommitT> committerFactory,
-            CommittableStateManager<GlobalCommitT> committableStateManager,
-            Long endInputWatermark) {
-        this.sinkCommitterCoordinatorOperatorEnabled = sinkCommitterCoordinatorOperatorEnabled;
         this.streamingCheckpointEnabled = streamingCheckpointEnabled;
         this.forceSingleParallelism = forceSingleParallelism;
         this.initialCommitUser = initialCommitUser;
@@ -117,9 +96,6 @@ public class CommitterOperatorFactory<CommitT, GlobalCommitT>
     @SuppressWarnings("unchecked")
     public <T extends StreamOperator<CommitT>> T createStreamOperator(
             StreamOperatorParameters<CommitT> parameters) {
-        if (sinkCommitterCoordinatorOperatorEnabled) {
-            throw new UnsupportedOperationException("Committer Coordinator Operator not support yet.");
-        }
         return (T)
                 new CommitterOperator<>(
                         parameters,

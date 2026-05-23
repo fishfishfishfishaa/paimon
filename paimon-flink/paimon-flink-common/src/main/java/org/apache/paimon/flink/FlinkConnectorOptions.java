@@ -338,13 +338,6 @@ public class FlinkConnectorOptions {
                                     + "cache refreshing is forbidden. Blacklist format is start1->end1,start2->end2,... , "
                                     + "and the time format is yyyy-MM-dd HH:mm. Only used when lookup table is FULL cache mode.");
 
-    public static final ConfigOption<Boolean> SINK_COMMITTER_COORDINATOR_OPERATOR_ENABLED =
-            key("sink.committer-coordinator-operator.enabled")
-                    .booleanType()
-                    .defaultValue(false)
-                    .withDescription(
-                            "When users set it true, it will use PaimonWriterCoordinator instead of committer operator in flink job.");
-
     public static final ConfigOption<Boolean> SINK_AUTO_TAG_FOR_SAVEPOINT =
             ConfigOptions.key("sink.savepoint.auto-tag")
                     .booleanType()
@@ -512,6 +505,20 @@ public class FlinkConnectorOptions {
                     .withDescription(
                             "Commit listener will be called after a successful commit. This option list custom commit "
                                     + "listener identifiers separated by comma.");
+
+    public static final ConfigOption<Boolean> SINK_COMMITTER_COORDINATOR_OPERATOR_ENABLED =
+            key("sink.committer-coordinator-operator.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription("Enable committer coordinator to commit in Job Manager.");
+
+    public static final ConfigOption<String> SINK_COMMITTER_COORDINATOR_STATE_DIR =
+            key("sink.committer-coordinator-operator.state-dir")
+                    .stringType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Optional override for PWC state directory. "
+                                    + "If not set, uses Flink checkpoint directory.");
 
     public static final ConfigOption<Boolean> SINK_WRITER_COORDINATOR_ENABLED =
             key("sink.writer-coordinator.enabled")
