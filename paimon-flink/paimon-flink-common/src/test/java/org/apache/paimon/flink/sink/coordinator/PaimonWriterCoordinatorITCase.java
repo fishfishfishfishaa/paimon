@@ -32,6 +32,7 @@ import org.apache.flink.api.connector.source.Boundedness;
 import org.apache.flink.api.connector.source.ReaderOutput;
 import org.apache.flink.api.connector.source.SourceReader;
 import org.apache.flink.api.connector.source.SourceReaderContext;
+import org.apache.flink.api.dag.Transformation;
 import org.apache.flink.core.execution.JobClient;
 import org.apache.flink.core.io.InputStatus;
 import org.apache.flink.runtime.execution.ExecutionState;
@@ -49,11 +50,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.lang.reflect.Field;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.assertThat;
 
 /** Integration tests for {@link PaimonWriterCoordinator}. */
 @SuppressWarnings("BusyWait")
@@ -89,23 +93,20 @@ public class PaimonWriterCoordinatorITCase extends CatalogITCaseBase {
 
     @Test
     @Timeout(120)
-    public void testFixedTableRejectsWriterCoordinator() throws Exception {
-        assertThatThrownBy(() -> buildPaimonSink("fixed_table"))
-                .isInstanceOf(UnsupportedOperationException.class)
-                .hasMessageContaining("committer operator is the main region failover boundary");
+    public void testFixedTableIgnoresWriterCoordinatorOption() throws Exception {
+        assertUsesGlobalCommitter(buildPaimonSink("fixed_table"), "fixed_table");
     }
 
     @Test
     @Timeout(120)
-    public void testDynamicTableRejectsWriterCoordinator() throws Exception {
-        assertThatThrownBy(() -> buildPaimonSink("dynamic_table"))
-                .isInstanceOf(UnsupportedOperationException.class)
-                .hasMessageContaining("committer operator is the main region failover boundary");
+    public void testDynamicTableIgnoresWriterCoordinatorOption() throws Exception {
+        assertUsesGlobalCommitter(buildPaimonSink("dynamic_table"), "dynamic_table");
     }
 
     private void testStreamingCheckpointWriteWithWriterCoordinator(String tableName)
             throws Exception {
         StreamExecutionEnvironment env = buildPaimonSink(tableName);
+        assertThat(transformationNames(env)).doesNotContain("Global Committer : " + tableName);
 
         JobClient jobClient = env.executeAsync();
         triggerCheckpointAndWaitForWrites(jobClient, tableName, 4);
@@ -139,6 +140,24 @@ public class PaimonWriterCoordinatorITCase extends CatalogITCaseBase {
                                 .setParallelism(1))
                 .build();
         return env;
+    }
+
+    private void assertUsesGlobalCommitter(StreamExecutionEnvironment env, String tableName) {
+        assertThat(transformationNames(env)).contains("Global Committer : " + tableName);
+    }
+
+    private List<String> transformationNames(StreamExecutionEnvironment env) {
+        List<String> names = new ArrayList<>();
+        List<Transformation<?>> pending = new ArrayList<>(env.getTransformations());
+        Set<Integer> visited = new HashSet<>();
+        while (!pending.isEmpty()) {
+            Transformation<?> transformation = pending.remove(pending.size() - 1);
+            if (visited.add(transformation.getId())) {
+                names.add(transformation.getName());
+                pending.addAll(transformation.getInputs());
+            }
+        }
+        return names;
     }
 
     @SuppressWarnings("unchecked")
