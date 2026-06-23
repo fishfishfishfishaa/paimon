@@ -50,7 +50,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
             Pattern.compile(
                     "\\\"id\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"[^{}]*"
                             + "\\\"name\\\"\\s*:\\s*\\\"[^\\\"]*"
-                            + "Writer(?:\\(write-only\\))?\\s*:\\s*pip30_sink\\\"");
+                            + "Writer\\(write-only\\)\\s*:\\s*pip30_sink[^\\\"]*\\\"");
     private static final Pattern INTEGER_PATTERN = Pattern.compile("(\\d+)");
 
     public PaimonWriterCoordinatorE2eTest() {
