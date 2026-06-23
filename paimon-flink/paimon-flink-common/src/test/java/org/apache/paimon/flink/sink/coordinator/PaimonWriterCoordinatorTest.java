@@ -90,7 +90,10 @@ public class PaimonWriterCoordinatorTest {
         commitUser = UUID.randomUUID().toString();
     }
 
-    // basic function
+    // ------------------------------------------------------------------------
+    //  basic function tests
+    // ------------------------------------------------------------------------
+
     /** Commit user in Flink state */
     @Test
     public void testCommitUserRestoredFromCoordinatorState() throws Exception {
@@ -196,7 +199,10 @@ public class PaimonWriterCoordinatorTest {
         coordinator.close();
     }
 
-    // Recovery
+    // ------------------------------------------------------------------------
+    //  Recovery tests
+    // ------------------------------------------------------------------------
+
     /**
      * CK0 commit, CK1 abort but Task not fail, CK2 commit The aborted checkpoint creates no table
      * data, while completing the next checkpoint commits both the re-reported and newly produced
