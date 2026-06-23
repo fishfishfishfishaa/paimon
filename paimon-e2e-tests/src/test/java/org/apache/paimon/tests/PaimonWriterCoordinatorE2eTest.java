@@ -349,17 +349,19 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
     }
 
     private ContainerState findTaskManager(SubtaskAttempt attempt) {
+        String normalizedHost = attempt.host.replace('_', '-');
         for (int i = 1; i <= 2; i++) {
             ContainerState taskManager =
                     environment.getContainerByServiceName("taskmanager-" + i).get();
-            boolean matches =
+            boolean hostnameMatches = normalizedHost.endsWith("-taskmanager-" + i);
+            boolean ipMatches =
                     taskManager.getContainerInfo().getNetworkSettings().getNetworks().values()
                             .stream()
                             .anyMatch(
                                     network ->
                                             attempt.host.startsWith(network.getIpAddress() + ":")
                                                     || attempt.host.equals(network.getIpAddress()));
-            if (matches) {
+            if (hostnameMatches || ipMatches) {
                 return taskManager;
             }
         }
@@ -426,24 +428,43 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
     }
 
     private void cancel(String jobId) throws Exception {
-        Container.ExecResult result = jobManager.execInContainer("bin/flink", "cancel", jobId);
-        assertThat(result.getExitCode()).isZero();
+        Container.ExecResult result =
+                jobManager.execInContainerWithUser("flink", "bin/flink", "cancel", jobId);
+        assertCommandSucceeded("cancel job", result);
         waitForJobStatus(jobId, "CANCELED");
     }
 
     private String cancelWithSavepoint(String jobId) throws Exception {
         String directory = TEST_DATA_DIR + "/savepoints-" + UUID.randomUUID();
-        jobManager.execInContainer("mkdir", "-p", directory);
-        Container.ExecResult result =
-                jobManager.execInContainer("bin/flink", "cancel", "-s", directory, jobId);
-        assertThat(result.getExitCode()).isZero();
+        Container.ExecResult mkdir =
+                jobManager.execInContainerWithUser("flink", "mkdir", "-p", directory);
+        assertCommandSucceeded("create savepoint directory", mkdir);
 
-        Matcher path = Pattern.compile("Path:\\s*(\\S+)").matcher(result.getStdout());
+        Container.ExecResult result =
+                jobManager.execInContainerWithUser(
+                        "flink", "bin/flink", "cancel", "-s", directory, jobId);
+        assertCommandSucceeded("cancel job with savepoint", result);
+
+        Matcher path =
+                Pattern.compile("Path:\\s*(\\S+)")
+                        .matcher(result.getStdout() + '\n' + result.getStderr());
         if (!path.find()) {
-            throw new AssertionError("Cannot find savepoint path: " + result.getStdout());
+            throw new AssertionError(
+                    "Cannot find savepoint path.\nstdout:\n"
+                            + result.getStdout()
+                            + "\nstderr:\n"
+                            + result.getStderr());
         }
         waitForJobStatus(jobId, "CANCELED");
         return path.group(1);
+    }
+
+    private void assertCommandSucceeded(String command, Container.ExecResult result) {
+        assertThat(result.getExitCode())
+                .withFailMessage(
+                        "%s failed with exit code %s.\nstdout:\n%s\nstderr:\n%s",
+                        command, result.getExitCode(), result.getStdout(), result.getStderr())
+                .isZero();
     }
 
     private String rest(String method, String path, String body) throws Exception {
