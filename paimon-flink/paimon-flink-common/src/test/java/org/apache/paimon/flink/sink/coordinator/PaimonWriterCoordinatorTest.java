@@ -94,7 +94,6 @@ public class PaimonWriterCoordinatorTest {
     //  basic function tests
     // ------------------------------------------------------------------------
 
-    /** Commit user in Flink state */
     @Test
     public void testCommitUserRestoredFromCoordinatorState() throws Exception {
         FileStoreTable table = createFileStoreTable();
@@ -235,7 +234,7 @@ public class PaimonWriterCoordinatorTest {
         coordinator.close();
     }
 
-    /** Only one of two subtasks reports a checkpoint before it is aborted; */
+    /** Only one of two subtasks reports a checkpoint before it is aborted. */
     @Test
     public void testPartialCheckpointAbortDoesNotFailJob() throws Exception {
         FileStoreTable table = createFileStoreTable();
