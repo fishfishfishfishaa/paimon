@@ -21,14 +21,22 @@ package org.apache.paimon.flink.sink.coordinator;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.flink.CatalogITCaseBase;
 import org.apache.paimon.flink.sink.FlinkSinkBuilder;
+import org.apache.paimon.flink.source.AbstractNonCoordinatedSource;
+import org.apache.paimon.flink.source.AbstractNonCoordinatedSourceReader;
+import org.apache.paimon.flink.source.SimpleSourceSplit;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.connector.source.Boundedness;
+import org.apache.flink.api.connector.source.ReaderOutput;
+import org.apache.flink.api.connector.source.SourceReader;
+import org.apache.flink.api.connector.source.SourceReaderContext;
 import org.apache.flink.core.execution.JobClient;
+import org.apache.flink.core.io.InputStatus;
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.minicluster.MiniCluster;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunction;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
@@ -123,8 +131,11 @@ public class PaimonWriterCoordinatorITCase extends CatalogITCaseBase {
 
         new FlinkSinkBuilder(paimonTable(tableName))
                 .forRowData(
-                        env.addSource(new EmitOnceAndWaitSource())
-                                .returns(InternalTypeInfo.of(ROW_TYPE))
+                        env.fromSource(
+                                        new EmitOnceAndWaitSource(),
+                                        WatermarkStrategy.noWatermarks(),
+                                        "EmitOnceAndWaitSource",
+                                        InternalTypeInfo.of(ROW_TYPE))
                                 .setParallelism(1))
                 .build();
         return env;
@@ -203,28 +214,36 @@ public class PaimonWriterCoordinatorITCase extends CatalogITCaseBase {
         return snapshot;
     }
 
-    private static class EmitOnceAndWaitSource extends RichParallelSourceFunction<RowData> {
+    private static class EmitOnceAndWaitSource extends AbstractNonCoordinatedSource<RowData> {
 
         private static final long serialVersionUID = 1L;
 
-        private volatile boolean running = true;
-
         @Override
-        public void run(SourceContext<RowData> ctx) throws Exception {
-            synchronized (ctx.getCheckpointLock()) {
-                ctx.collect(row(1, "one"));
-                ctx.collect(row(2, "two"));
-                ctx.collect(row(3, "three"));
-                ctx.collect(row(4, "four"));
-            }
-            while (running) {
-                Thread.sleep(100L);
-            }
+        public Boundedness getBoundedness() {
+            return Boundedness.CONTINUOUS_UNBOUNDED;
         }
 
         @Override
-        public void cancel() {
-            running = false;
+        public SourceReader<RowData, SimpleSourceSplit> createReader(
+                SourceReaderContext sourceReaderContext) {
+            return new Reader();
+        }
+
+        private static class Reader extends AbstractNonCoordinatedSourceReader<RowData> {
+
+            private boolean emitted;
+
+            @Override
+            public InputStatus pollNext(ReaderOutput<RowData> output) {
+                if (!emitted) {
+                    output.collect(row(1, "one"));
+                    output.collect(row(2, "two"));
+                    output.collect(row(3, "three"));
+                    output.collect(row(4, "four"));
+                    emitted = true;
+                }
+                return InputStatus.NOTHING_AVAILABLE;
+            }
         }
 
         private static RowData row(int k, String v) {
