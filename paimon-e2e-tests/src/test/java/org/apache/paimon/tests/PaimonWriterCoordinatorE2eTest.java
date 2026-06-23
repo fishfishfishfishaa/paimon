@@ -472,7 +472,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         }
         StringBuilder result = new StringBuilder();
         try (BufferedReader reader =
-                     new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8))) {
+                new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 result.append(line);

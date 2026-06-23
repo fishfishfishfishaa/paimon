@@ -105,11 +105,11 @@ public abstract class E2eTestBase {
         LOG.info("Network {} created", network.getId());
         environment =
                 new ComposeContainer(
-                        new File(
-                                E2eTestBase.class
-                                        .getClassLoader()
-                                        .getResource("docker-compose.yaml")
-                                        .toURI()))
+                                new File(
+                                        E2eTestBase.class
+                                                .getClassLoader()
+                                                .getResource("docker-compose.yaml")
+                                                .toURI()))
                         .withEnv("NETWORK_ID", ((Network.NetworkImpl) network).getName())
                         .withLogConsumer("jobmanager-1", new LogConsumer(LOG))
                         .withStartupTimeout(Duration.ofMinutes(3))
