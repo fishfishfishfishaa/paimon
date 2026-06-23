@@ -121,6 +121,9 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         waitForJobStatus(jobId, "RUNNING");
         triggerAndWaitForCompletedCheckpoint(jobId);
         Map<Integer, SubtaskAttempt> after = getSubtaskAttempts(jobId, writerVertexId);
+        System.out.println("before=" + before);
+        System.out.println("after=" + after);
+        System.out.println(jobManager.getLogs());
         assertThat(after.get(0).attempt).isEqualTo(before.get(0).attempt);
         assertThat(after.get(1).attempt).isEqualTo(before.get(1).attempt);
 
@@ -255,6 +258,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
                 "SET 'parallelism.default' = '2';\n"
                         + "SET 'execution.checkpointing.interval' = '1 d';\n"
                         + "SET 'execution.checkpointing.timeout' = '10 s';\n"
+                        + "SET 'execution.checkpointing.tolerable-failed-checkpoints' = '1';\n"
                         + "SET 'restart-strategy' = 'fixed-delay';\n"
                         + "SET 'restart-strategy.fixed-delay.attempts' = '10';\n"
                         + "SET 'restart-strategy.fixed-delay.delay' = '1 s';\n"
@@ -598,6 +602,20 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
             this.attempt = attempt;
             this.status = status;
             this.host = host;
+        }
+
+        @Override
+        public String toString() {
+            return "SubtaskAttempt{"
+                    + "attempt="
+                    + attempt
+                    + ", status='"
+                    + status
+                    + '\''
+                    + ", host='"
+                    + host
+                    + '\''
+                    + '}';
         }
     }
 }
