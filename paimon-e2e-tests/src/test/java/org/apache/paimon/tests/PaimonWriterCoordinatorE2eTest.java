@@ -48,8 +48,9 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
     private static final long WAIT_TIMEOUT_MS = 120_000L;
     private static final Pattern VERTEX_PATTERN =
             Pattern.compile(
-                    "\\\"id\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"\\s*,\\s*"
-                            + "\\\"name\\\"\\s*:\\s*\\\"([^\\\"]*Writer[^\\\"]*)\\\"");
+                    "\\\"id\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"[^{}]*"
+                            + "\\\"name\\\"\\s*:\\s*\\\"[^\\\"]*"
+                            + "Writer(?:\\(write-only\\))?\\s*:\\s*pip30_sink\\\"");
     private static final Pattern INTEGER_PATTERN = Pattern.compile("(\\d+)");
 
     public PaimonWriterCoordinatorE2eTest() {
@@ -67,7 +68,8 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         waitForRecords();
         triggerAndWaitForCompletedCheckpoint(jobId);
 
-        assertThat(rest("GET", "/jobs/" + jobId + "/plan", null)).doesNotContain("Committer");
+        assertThat(rest("GET", "/jobs/" + jobId + "/plan", null))
+                .doesNotContain("Committer", "Compact Coordinator", "Compact Worker");
         waitUntil(
                 () -> jobManager.getLogs().contains("Paimon writer coordinator starting"),
                 "PWC did not start.");
@@ -83,6 +85,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
 
         String jobId = submit(context);
         waitForJobStatus(jobId, "RUNNING");
+        waitForWriterSubtasks(jobId);
         waitForRecords();
         triggerAndWaitForCompletedCheckpoint(jobId);
 
@@ -132,6 +135,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
 
         String jobId = submit(context);
         waitForJobStatus(jobId, "RUNNING");
+        waitForWriterSubtasks(jobId);
         waitForRecords();
         triggerAndWaitForCompletedCheckpoint(jobId);
 
@@ -154,6 +158,8 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
                     Map<Integer, SubtaskAttempt> attempts =
                             getSubtaskAttempts(jobId, writerVertexId);
                     return attempts.size() == 2
+                            && attempts.values().stream()
+                                    .allMatch(attempt -> "RUNNING".equals(attempt.status))
                             && attempts.get(0).attempt > before.get(0).attempt
                             && "RUNNING".equals(jobStatus(jobId));
                 },
@@ -181,6 +187,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
 
         String restoredJobId = submit(context, savepoint);
         waitForJobStatus(restoredJobId, "RUNNING");
+        waitForWriterSubtasks(restoredJobId);
         sendRecords(context.topic, 20, 20);
         waitForRecords();
         triggerAndWaitForCompletedCheckpoint(restoredJobId);
@@ -228,6 +235,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
                         + "    payload STRING\n"
                         + ") WITH (\n"
                         + "    'bucket' = '-1',\n"
+                        + "    'write-only' = 'true',\n"
                         + "    'sink.committer-coordinator-operator.enabled' = 'true'\n"
                         + ");";
         return new TestContext(topic, catalogDdl, sourceDdl, tableDdl);
@@ -311,7 +319,13 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
     private Map<Integer, SubtaskAttempt> waitForWriterSubtasks(String jobId) throws Exception {
         String writerVertexId = findWriterVertexId(jobId);
         waitUntil(
-                () -> getSubtaskAttempts(jobId, writerVertexId).size() == 2,
+                () -> {
+                    Map<Integer, SubtaskAttempt> attempts =
+                            getSubtaskAttempts(jobId, writerVertexId);
+                    return attempts.size() == 2
+                            && attempts.values().stream()
+                                    .allMatch(attempt -> "RUNNING".equals(attempt.status));
+                },
                 "Writer subtasks did not become available.");
         return getSubtaskAttempts(jobId, writerVertexId);
     }
@@ -325,9 +339,10 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
             String subtask = subtasks[i];
             Integer index = firstInteger(subtask);
             Integer attempt = integerField(subtask, "attempt");
+            String status = stringField(subtask, "status");
             String host = stringField(subtask, "host");
-            if (index != null && attempt != null && host != null) {
-                attempts.put(index, new SubtaskAttempt(attempt, host));
+            if (index != null && attempt != null && status != null && host != null) {
+                attempts.put(index, new SubtaskAttempt(attempt, status, host));
             }
         }
         return attempts;
@@ -555,10 +570,12 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
     private static class SubtaskAttempt {
 
         private final int attempt;
+        private final String status;
         private final String host;
 
-        private SubtaskAttempt(int attempt, String host) {
+        private SubtaskAttempt(int attempt, String status, String host) {
             this.attempt = attempt;
+            this.status = status;
             this.host = host;
         }
     }
