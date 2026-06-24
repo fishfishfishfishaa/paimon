@@ -342,6 +342,10 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
             Integer attempt = integerField(subtask, "attempt");
             String status = stringField(subtask, "status");
             String host = stringField(subtask, "host");
+            if (host == null) {
+                // support for Flink 2.2 REST API
+                host = stringField(subtask, "endpoint");
+            }
             if (index != null && attempt != null && status != null && host != null) {
                 attempts.put(index, new SubtaskAttempt(attempt, status, host));
             }
