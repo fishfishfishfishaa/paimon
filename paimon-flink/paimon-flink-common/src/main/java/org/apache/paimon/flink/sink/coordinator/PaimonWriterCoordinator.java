@@ -138,6 +138,7 @@ public class PaimonWriterCoordinator implements OperatorCoordinator, Coordinatio
     @Override
     public void checkpointCoordinator(long checkpointId, CompletableFuture<byte[]> result) {
         freshInstance = false;
+        LOG.info("PWC snapshot commitUser={}, checkpointId={}", commitUser, checkpointId);
         checkState(commitUser != null, "PWC has not been started.");
         result.complete(serializeCoordinatorState(commitUser));
     }

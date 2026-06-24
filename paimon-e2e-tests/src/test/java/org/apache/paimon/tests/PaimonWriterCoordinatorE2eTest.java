@@ -121,9 +121,6 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         waitForJobStatus(jobId, "RUNNING");
         triggerAndWaitForCompletedCheckpoint(jobId);
         Map<Integer, SubtaskAttempt> after = getSubtaskAttempts(jobId, writerVertexId);
-        System.out.println("before=" + before);
-        System.out.println("after=" + after);
-        System.out.println(jobManager.getLogs());
         assertThat(after.get(0).attempt).isEqualTo(before.get(0).attempt);
         assertThat(after.get(1).attempt).isEqualTo(before.get(1).attempt);
 
@@ -449,9 +446,10 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
                         "flink", "bin/flink", "cancel", "-s", directory, jobId);
         assertCommandSucceeded("cancel job with savepoint", result);
 
+        String output = result.getStdout() + '\n' + result.getStderr();
         Matcher path =
-                Pattern.compile("Path:\\s*(\\S+)")
-                        .matcher(result.getStdout() + '\n' + result.getStderr());
+                Pattern.compile("Path:\\s*(\\S+)|Savepoint stored in\\s+(\\S+)\\.").matcher(output);
+
         if (!path.find()) {
             throw new AssertionError(
                     "Cannot find savepoint path.\nstdout:\n"
@@ -459,8 +457,10 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
                             + "\nstderr:\n"
                             + result.getStderr());
         }
+
+        String savepointPath = path.group(1) != null ? path.group(1) : path.group(2);
         waitForJobStatus(jobId, "CANCELED");
-        return path.group(1);
+        return savepointPath;
     }
 
     private void assertCommandSucceeded(String command, Container.ExecResult result) {
