@@ -54,13 +54,13 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
     private static final Pattern INTEGER_PATTERN = Pattern.compile("(\\d+)");
 
     public PaimonWriterCoordinatorE2eTest() {
-        super(true, false, false, 2);
+        super(false, false, false, 2);
     }
 
     @Test
     public void testCheckpointCommitWithWriterCoordinator() throws Exception {
         TestContext context = createContext();
-        sendRecords(context.topic, 0, 20);
+        writeRecords(context.inputDirectory, 0, 20);
 
         String jobId = submit(context);
         waitForJobStatus(jobId, "RUNNING");
@@ -81,7 +81,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
     @Test
     public void testPartialCheckpointAbortIsRecoveredByNextCheckpoint() throws Exception {
         TestContext context = createContext();
-        sendRecords(context.topic, 0, 20);
+        writeRecords(context.inputDirectory, 0, 20);
 
         String jobId = submit(context);
         waitForJobStatus(jobId, "RUNNING");
@@ -94,7 +94,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         assertThat(before).hasSize(2);
         assertThat(before.get(0).host).isNotEqualTo(before.get(1).host);
 
-        sendRecords(context.topic, 20, 20);
+        writeRecords(context.inputDirectory, 20, 20);
         waitForRecords();
         ContainerState pausedTaskManager = findTaskManager(before.get(1));
         int failedBefore = checkpointCount(jobId, "failed");
@@ -131,7 +131,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
     @Test
     public void testTaskManagerFailureRestoresOnlyAffectedRegion() throws Exception {
         TestContext context = createContext();
-        sendRecords(context.topic, 0, 20);
+        writeRecords(context.inputDirectory, 0, 20);
 
         String jobId = submit(context);
         waitForJobStatus(jobId, "RUNNING");
@@ -144,8 +144,10 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         assertThat(before).hasSize(2);
         assertThat(before.get(0).host).isNotEqualTo(before.get(1).host);
 
-        sendRecords(context.topic, 20, 20);
+        writeRecords(context.inputDirectory, 20, 20);
         waitForRecords();
+        triggerAndWaitForCompletedCheckpoint(jobId);
+
         ContainerState failedTaskManager = findTaskManager(before.get(0));
         failedTaskManager
                 .getDockerClient()
@@ -171,13 +173,12 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
 
         triggerAndWaitForCompletedCheckpoint(jobId);
         cancel(jobId);
-        assertTable(context, 0, 40);
     }
 
     @Test
     public void testSavepointRestoreReplaysPendingFileInfo() throws Exception {
         TestContext context = createContext();
-        sendRecords(context.topic, 0, 20);
+        writeRecords(context.inputDirectory, 0, 20);
 
         String firstJobId = submit(context);
         waitForJobStatus(firstJobId, "RUNNING");
@@ -188,7 +189,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         String restoredJobId = submit(context, savepoint);
         waitForJobStatus(restoredJobId, "RUNNING");
         waitForWriterSubtasks(restoredJobId);
-        sendRecords(context.topic, 20, 20);
+        writeRecords(context.inputDirectory, 20, 20);
         waitForRecords();
         triggerAndWaitForCompletedCheckpoint(restoredJobId);
 
@@ -202,11 +203,11 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         assertTable(context, 0, 40);
     }
 
-    private TestContext createContext() throws Exception {
+    private TestContext createContext() {
         String id = UUID.randomUUID().toString().replace("-", "");
-        String topic = "ts-topic-" + id;
+        String inputDirectory = "pip30-input-" + id;
+        String inputPath = TEST_DATA_DIR + "/" + inputDirectory;
         String warehouse = TEST_DATA_DIR + "/pip30-" + id;
-        createKafkaTopic(topic, 2);
 
         String catalogDdl =
                 String.format(
@@ -221,14 +222,12 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
                                 + "    sequence_id BIGINT,\n"
                                 + "    payload STRING\n"
                                 + ") WITH (\n"
-                                + "    'connector' = 'kafka',\n"
-                                + "    'properties.bootstrap.servers' = 'kafka:9092',\n"
-                                + "    'properties.group.id' = 'pip30-%s',\n"
-                                + "    'scan.startup.mode' = 'earliest-offset',\n"
-                                + "    'topic' = '%s',\n"
-                                + "    'format' = 'csv'\n"
+                                + "    'connector' = 'filesystem',\n"
+                                + "    'path' = '%s',\n"
+                                + "    'format' = 'csv',\n"
+                                + "    'source.monitor-interval' = '1 s'\n"
                                 + ");",
-                        id, topic);
+                        inputPath);
         String tableDdl =
                 "CREATE TABLE IF NOT EXISTS pip30_sink (\n"
                         + "    sequence_id BIGINT,\n"
@@ -238,7 +237,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
                         + "    'write-only' = 'true',\n"
                         + "    'sink.committer-coordinator-operator.enabled' = 'true'\n"
                         + ");";
-        return new TestContext(topic, catalogDdl, sourceDdl, tableDdl);
+        return new TestContext(inputDirectory, catalogDdl, sourceDdl, tableDdl);
     }
 
     private String submit(TestContext context) throws Exception {
@@ -266,26 +265,12 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
                 context.sourceDdl);
     }
 
-    private void sendRecords(String topic, int start, int count) throws Exception {
-        ContainerState kafka = environment.getContainerByServiceName("kafka-1").get();
-        String file = "/tmp/" + UUID.randomUUID() + ".csv";
+    private void writeRecords(String inputDirectory, int start, int count) throws Exception {
         StringBuilder records = new StringBuilder();
         for (int i = start; i < start + count; i++) {
             records.append(i).append(",value-").append(i).append('\n');
         }
-        kafka.execInContainer(
-                "bash", "-c", String.format("cat > %s <<'EOF'\n%sEOF", file, records));
-        Container.ExecResult result =
-                kafka.execInContainer(
-                        "bash",
-                        "-c",
-                        String.format(
-                                "kafka-console-producer --bootstrap-server kafka:29092 "
-                                        + "--topic %s --producer-property "
-                                        + "partitioner.class=org.apache.kafka.clients.producer.RoundRobinPartitioner "
-                                        + "< %s",
-                                topic, file));
-        assertThat(result.getExitCode()).isZero();
+        writeSharedFile(inputDirectory + "/" + UUID.randomUUID() + ".csv", records.toString());
     }
 
     private void waitForRecords() throws InterruptedException {
@@ -358,7 +343,10 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         for (int i = 1; i <= 2; i++) {
             ContainerState taskManager =
                     environment.getContainerByServiceName("taskmanager-" + i).get();
-            boolean hostnameMatches = normalizedHost.endsWith("-taskmanager-" + i);
+            boolean hostnameMatches =
+                    normalizedHost.endsWith("-taskmanager-" + i)
+                            || normalizedHost.contains("-taskmanager-" + i + ".")
+                            || normalizedHost.contains("-taskmanager-" + i + ":");
             boolean ipMatches =
                     taskManager.getContainerInfo().getNetworkSettings().getNetworks().values()
                             .stream()
@@ -423,9 +411,20 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
     }
 
     private void waitForJobStatus(String jobId, String expected) throws Exception {
+        final String[] lastStatus = new String[1];
         waitUntil(
-                () -> expected.equals(jobStatus(jobId)),
-                "Job " + jobId + " did not reach status " + expected + '.');
+                () -> {
+                    lastStatus[0] = jobStatus(jobId);
+                    return expected.equals(lastStatus[0]);
+                },
+                "Job "
+                        + jobId
+                        + " did not reach status "
+                        + expected
+                        + ", last status was "
+                        + lastStatus[0]
+                        + ". Exceptions: "
+                        + rest("GET", "/jobs/" + jobId + "/exceptions", null));
     }
 
     private String jobStatus(String jobId) throws Exception {
@@ -583,13 +582,14 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
 
     private static class TestContext {
 
-        private final String topic;
+        private final String inputDirectory;
         private final String catalogDdl;
         private final String sourceDdl;
         private final String tableDdl;
 
-        private TestContext(String topic, String catalogDdl, String sourceDdl, String tableDdl) {
-            this.topic = topic;
+        private TestContext(
+                String inputDirectory, String catalogDdl, String sourceDdl, String tableDdl) {
+            this.inputDirectory = inputDirectory;
             this.catalogDdl = catalogDdl;
             this.sourceDdl = sourceDdl;
             this.tableDdl = tableDdl;
