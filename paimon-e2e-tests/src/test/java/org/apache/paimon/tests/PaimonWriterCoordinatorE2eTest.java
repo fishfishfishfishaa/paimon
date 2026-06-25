@@ -358,7 +358,10 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         for (int i = 1; i <= 2; i++) {
             ContainerState taskManager =
                     environment.getContainerByServiceName("taskmanager-" + i).get();
-            boolean hostnameMatches = normalizedHost.endsWith("-taskmanager-" + i);
+            boolean hostnameMatches =
+                    normalizedHost.endsWith("-taskmanager-" + i)
+                            || normalizedHost.contains("-taskmanager-" + i + ".")
+                            || normalizedHost.contains("-taskmanager-" + i + ":");
             boolean ipMatches =
                     taskManager.getContainerInfo().getNetworkSettings().getNetworks().values()
                             .stream()
