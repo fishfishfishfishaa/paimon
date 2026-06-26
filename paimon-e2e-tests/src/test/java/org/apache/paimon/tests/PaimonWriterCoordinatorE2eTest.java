@@ -79,8 +79,8 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
                 () -> jobManager.getLogs().contains("Paimon writer coordinator starting"),
                 "PWC did not start.");
 
-        waitForCommittedTable(jobId, context, 0, 20);
         cancel(jobId);
+        assertTable(context, 0, 20);
     }
 
     @Test
@@ -129,7 +129,6 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         assertThat(after.get(0).attempt).isEqualTo(before.get(0).attempt);
         assertThat(after.get(1).attempt).isEqualTo(before.get(1).attempt);
 
-        waitForCommittedTable(jobId, context, 0, 40);
         cancel(jobId);
     }
 
@@ -176,7 +175,6 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         assertThat(after.get(0).attempt).isGreaterThan(before.get(0).attempt);
         assertThat(after.get(1).attempt).isEqualTo(before.get(1).attempt);
 
-        waitForCommittedTable(jobId, context, 0, 40);
         cancel(jobId);
     }
 
@@ -204,8 +202,8 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
                                 >= 2,
                 "PWC was not recreated after savepoint restore.");
 
-        waitForCommittedTable(restoredJobId, context, 0, 40);
         cancel(restoredJobId);
+        assertTable(context, 0, 40);
     }
 
     private TestContext createContext() {
@@ -296,34 +294,6 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
             expected.add(i + ", value-" + i);
         }
         checkResult(expected.toArray(new String[0]));
-    }
-
-    private void waitForCommittedTable(String jobId, TestContext context, int start, int end)
-            throws Exception {
-        long deadline = System.currentTimeMillis() + WAIT_TIMEOUT_MS;
-        Throwable lastFailure = null;
-        while (System.currentTimeMillis() < deadline) {
-            try {
-                triggerAndWaitForCompletedCheckpoint(jobId);
-                assertTable(context, start, end);
-                return;
-            } catch (Throwable t) {
-                lastFailure = t;
-            }
-            Thread.sleep(1_000L);
-        }
-
-        AssertionError error =
-                new AssertionError(
-                        "Table result did not contain records ["
-                                + start
-                                + ", "
-                                + end
-                                + ") after repeated checkpoints.");
-        if (lastFailure != null) {
-            error.initCause(lastFailure);
-        }
-        throw error;
     }
 
     private String findWriterVertexId(String jobId) throws Exception {
