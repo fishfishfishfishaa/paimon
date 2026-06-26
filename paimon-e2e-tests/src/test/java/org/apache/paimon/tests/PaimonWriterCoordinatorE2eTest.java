@@ -51,6 +51,8 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
                     "\\\"id\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"[^{}]*"
                             + "\\\"name\\\"\\s*:\\s*\\\"[^\\\"]*"
                             + "Writer\\(write-only\\)\\s*:\\s*pip30_sink[^\\\"]*\\\"");
+    private static final Pattern SHIP_STRATEGY_PATTERN =
+            Pattern.compile("\\\"ship_strategy\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
     private static final Pattern INTEGER_PATTERN = Pattern.compile("(\\d+)");
 
     public PaimonWriterCoordinatorE2eTest() {
@@ -130,6 +132,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         assertThat(after.get(1).attempt).isEqualTo(before.get(1).attempt);
 
         cancel(jobId);
+        assertTable(context, 0, 40);
     }
 
     @Test
@@ -144,6 +147,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         triggerAndWaitForCompletedCheckpoint(jobId);
 
         String writerVertexId = findWriterVertexId(jobId);
+        assertWriterInputIsPointwise(jobId);
         Map<Integer, SubtaskAttempt> before = waitForWriterSubtasks(jobId);
         assertThat(before).hasSize(2);
         assertThat(before.get(0).host).isNotEqualTo(before.get(1).host);
@@ -175,7 +179,9 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         assertThat(after.get(0).attempt).isGreaterThan(before.get(0).attempt);
         assertThat(after.get(1).attempt).isEqualTo(before.get(1).attempt);
 
+        triggerAndWaitForCompletedCheckpoint(jobId);
         cancel(jobId);
+        assertTable(context, 0, 40);
     }
 
     @Test
@@ -303,6 +309,33 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
             throw new AssertionError("Cannot find writer vertex in job details: " + details);
         }
         return matcher.group(1);
+    }
+
+    private void assertWriterInputIsPointwise(String jobId) throws Exception {
+        String plan = rest("GET", "/jobs/" + jobId + "/plan", null);
+        int writer = plan.indexOf("Writer(write-only) : pip30_sink");
+        if (writer < 0) {
+            throw new AssertionError("Cannot find writer in job plan: " + plan);
+        }
+
+        int inputs = plan.indexOf("\"inputs\"", writer);
+        if (inputs < 0) {
+            throw new AssertionError("Cannot find writer inputs in job plan: " + plan);
+        }
+
+        String writerInputs = plan.substring(inputs, Math.min(plan.length(), inputs + 2_000));
+        Matcher matcher = SHIP_STRATEGY_PATTERN.matcher(writerInputs);
+        if (!matcher.find()) {
+            throw new AssertionError("Cannot find writer input ship strategy: " + plan);
+        }
+
+        String shipStrategy = matcher.group(1);
+        assertThat(shipStrategy)
+                .withFailMessage(
+                        "Writer input must be pointwise to verify region failover, but was %s.%n"
+                                + "Plan:%n%s",
+                        shipStrategy, plan)
+                .isIn("FORWARD", "RESCALE");
     }
 
     private Map<Integer, SubtaskAttempt> waitForWriterSubtasks(String jobId) throws Exception {
