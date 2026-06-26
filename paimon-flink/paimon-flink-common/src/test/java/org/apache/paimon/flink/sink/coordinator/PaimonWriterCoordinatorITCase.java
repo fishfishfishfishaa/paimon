@@ -92,13 +92,11 @@ public class PaimonWriterCoordinatorITCase extends CatalogITCaseBase {
     }
 
     @Test
-    @Timeout(120)
     public void testFixedTableIgnoresWriterCoordinatorOption() throws Exception {
         assertUsesGlobalCommitter(buildPaimonSink("fixed_table"), "fixed_table");
     }
 
     @Test
-    @Timeout(120)
     public void testDynamicTableIgnoresWriterCoordinatorOption() throws Exception {
         assertUsesGlobalCommitter(buildPaimonSink("dynamic_table"), "dynamic_table");
     }

@@ -168,11 +168,7 @@ public class PaimonWriterCoordinatorTest {
     @Test
     public void testCheckpointCompleteRequiresStagedFileInfo() throws Exception {
         FileStoreTable table = createFileStoreTable();
-        OperatorCoordinator.Context context = Mockito.mock(OperatorCoordinator.Context.class);
-        when(context.getOperatorId()).thenReturn(operatorId);
-        when(context.currentParallelism()).thenReturn(2);
-        when(context.getUserCodeClassloader())
-                .thenReturn(Thread.currentThread().getContextClassLoader());
+        OperatorCoordinator.Context context = createContext(2);
         PaimonWriterCoordinator coordinator = createCoordinator(table, context);
         coordinator.start();
         register(coordinator, 0);
@@ -186,6 +182,10 @@ public class PaimonWriterCoordinatorTest {
         assertThat(table.snapshotManager().latestSnapshotId()).isNull();
         coordinator.close();
     }
+
+    // ------------------------------------------------------------------------
+    //  restore and recovered file-info tests
+    // ------------------------------------------------------------------------
 
     @Test
     public void testRecoveredFileInfoWithoutCoordinatorRestoreWaitsForCheckpointComplete()
@@ -213,11 +213,7 @@ public class PaimonWriterCoordinatorTest {
     public void testRecoveredFileInfoCommitsPendingCommittables() throws Exception {
         FileStoreTable table = createFileStoreTable();
         byte[] coordinatorState = createCoordinatorState(table, CK2);
-        OperatorCoordinator.Context context = Mockito.mock(OperatorCoordinator.Context.class);
-        when(context.getOperatorId()).thenReturn(operatorId);
-        when(context.currentParallelism()).thenReturn(2);
-        when(context.getUserCodeClassloader())
-                .thenReturn(Thread.currentThread().getContextClassLoader());
+        OperatorCoordinator.Context context = createContext(2);
         PaimonWriterCoordinator coordinator = createCoordinator(table, context);
         coordinator.resetToCheckpoint(CK2, coordinatorState);
         coordinator.start();
@@ -243,8 +239,102 @@ public class PaimonWriterCoordinatorTest {
         coordinator.close();
     }
 
+    /**
+     * Restored file info is recommitted and triggers the expected recovery failure, after which a
+     * newer checkpoint is reported and completed normally.
+     */
+    @Test
+    public void testCheckpointAfterRestoredCommitDoesNotFailJob() throws Exception {
+        FileStoreTable table = createFileStoreTable();
+        byte[] coordinatorState = createCoordinatorState(table, CK1);
+        OperatorCoordinator.Context context = createContext(1);
+        PaimonWriterCoordinator coordinator = createCoordinator(table, context);
+        coordinator.resetToCheckpoint(CK1, coordinatorState);
+        coordinator.start();
+        register(coordinator, 0);
+
+        sendRequest(
+                coordinator,
+                recoveredFileInfoRequest(
+                        CK1, 0, commitUser, committables(table, CK1, GenericRow.of(1, 10L))));
+        waitForCoordinator(coordinator);
+        Mockito.verify(context).failJob(Mockito.any(Throwable.class));
+        assertResults(table, "1, 10");
+
+        sendRequest(coordinator, fileInfoRequest(table, CK2, 0, GenericRow.of(2, 20L)));
+        coordinator.notifyCheckpointComplete(CK2);
+        waitForCoordinator(coordinator);
+
+        Mockito.verify(context, Mockito.times(1)).failJob(Mockito.any(Throwable.class));
+        assertResults(table, "1, 10", "2, 20");
+
+        coordinator.close();
+    }
+
+    /**
+     * At a restored checkpoint, one subtask reports data and another reports an empty recovered
+     * file-info payload.
+     */
+    @Test
+    public void testEmptyRestoredFileInfoCompletesRestoredCheckpoint() throws Exception {
+        FileStoreTable table = createFileStoreTable();
+        byte[] coordinatorState = createCoordinatorState(table, CK1);
+        OperatorCoordinator.Context context = createContext(2);
+        PaimonWriterCoordinator coordinator = createCoordinator(table, context);
+        coordinator.resetToCheckpoint(CK1, coordinatorState);
+        coordinator.start();
+        register(coordinator, 0);
+        register(coordinator, 1);
+
+        sendRequest(
+                coordinator,
+                recoveredFileInfoRequest(
+                        CK1, 0, commitUser, committables(table, CK1, GenericRow.of(1, 10L))));
+        waitForCoordinator(coordinator);
+        assertThat(table.snapshotManager().latestSnapshotId()).isNull();
+
+        sendRequest(
+                coordinator, recoveredFileInfoRequest(CK1, 1, commitUser, Collections.emptyList()));
+        waitForCoordinator(coordinator);
+
+        Mockito.verify(context).failJob(Mockito.any(Throwable.class));
+        assertResults(table, "1, 10");
+
+        coordinator.close();
+    }
+
+    /**
+     * During recovery to CK2, one recovered request cumulatively carries CK1 committables and the
+     * other recovered request is empty.
+     */
+    @Test
+    public void testEmptyFileInfoCompletesEarlierCheckpointBeforeRestoredCommit() throws Exception {
+        FileStoreTable table = createFileStoreTable();
+        byte[] coordinatorState = createCoordinatorState(table, CK2);
+        OperatorCoordinator.Context context = createContext(2);
+        PaimonWriterCoordinator coordinator = createCoordinator(table, context);
+        coordinator.resetToCheckpoint(CK2, coordinatorState);
+        coordinator.start();
+        register(coordinator, 0);
+        register(coordinator, 1);
+
+        List<Committable> ck1Subtask0 = committables(table, CK1, GenericRow.of(1, 10L));
+        sendRequest(coordinator, recoveredFileInfoRequest(CK2, 0, commitUser, ck1Subtask0));
+        waitForCoordinator(coordinator);
+        assertThat(table.snapshotManager().latestSnapshotId()).isNull();
+
+        sendRequest(
+                coordinator, recoveredFileInfoRequest(CK2, 1, commitUser, Collections.emptyList()));
+        waitForCoordinator(coordinator);
+
+        Mockito.verify(context).failJob(Mockito.any(Throwable.class));
+        assertResults(table, "1, 10");
+
+        coordinator.close();
+    }
+
     // ------------------------------------------------------------------------
-    //  Recovery tests
+    //  abort and late-arrival tests
     // ------------------------------------------------------------------------
 
     /**
@@ -283,11 +373,7 @@ public class PaimonWriterCoordinatorTest {
     @Test
     public void testPartialCheckpointAbortDoesNotFailJob() throws Exception {
         FileStoreTable table = createFileStoreTable();
-        OperatorCoordinator.Context context = Mockito.mock(OperatorCoordinator.Context.class);
-        when(context.getOperatorId()).thenReturn(operatorId);
-        when(context.currentParallelism()).thenReturn(2);
-        when(context.getUserCodeClassloader())
-                .thenReturn(Thread.currentThread().getContextClassLoader());
+        OperatorCoordinator.Context context = createContext(2);
         PaimonWriterCoordinator coordinator = createCoordinator(table, context);
         coordinator.start();
 
@@ -325,11 +411,7 @@ public class PaimonWriterCoordinatorTest {
     @Test
     public void testFileInfoAfterCheckpointAbortIsCommittedByLaterCheckpoint() throws Exception {
         FileStoreTable table = createFileStoreTable();
-        OperatorCoordinator.Context context = Mockito.mock(OperatorCoordinator.Context.class);
-        when(context.getOperatorId()).thenReturn(operatorId);
-        when(context.currentParallelism()).thenReturn(2);
-        when(context.getUserCodeClassloader())
-                .thenReturn(Thread.currentThread().getContextClassLoader());
+        OperatorCoordinator.Context context = createContext(2);
         PaimonWriterCoordinator coordinator = createCoordinator(table, context);
         coordinator.start();
 
@@ -363,11 +445,7 @@ public class PaimonWriterCoordinatorTest {
     @Test
     public void testDuplicateFileInfoAfterCollectedAbortIsRejected() throws Exception {
         FileStoreTable table = createFileStoreTable();
-        OperatorCoordinator.Context context = Mockito.mock(OperatorCoordinator.Context.class);
-        when(context.getOperatorId()).thenReturn(operatorId);
-        when(context.currentParallelism()).thenReturn(1);
-        when(context.getUserCodeClassloader())
-                .thenReturn(Thread.currentThread().getContextClassLoader());
+        OperatorCoordinator.Context context = createContext(1);
         PaimonWriterCoordinator coordinator = createCoordinator(table, context);
         coordinator.start();
         register(coordinator, 0);
@@ -393,11 +471,7 @@ public class PaimonWriterCoordinatorTest {
     @Test
     public void testLaterCheckpointCompleteCanCommitEarlierPartialFileInfo() throws Exception {
         FileStoreTable table = createFileStoreTable();
-        OperatorCoordinator.Context context = Mockito.mock(OperatorCoordinator.Context.class);
-        when(context.getOperatorId()).thenReturn(operatorId);
-        when(context.currentParallelism()).thenReturn(2);
-        when(context.getUserCodeClassloader())
-                .thenReturn(Thread.currentThread().getContextClassLoader());
+        OperatorCoordinator.Context context = createContext(2);
         PaimonWriterCoordinator coordinator = createCoordinator(table, context);
         coordinator.start();
 
@@ -421,6 +495,10 @@ public class PaimonWriterCoordinatorTest {
 
         coordinator.close();
     }
+
+    // ------------------------------------------------------------------------
+    //  attempt and stale-message tests
+    // ------------------------------------------------------------------------
 
     @Test
     public void testSubtaskFailoverReplacesUnstagedPendingFileInfo() throws Exception {
@@ -471,112 +549,6 @@ public class PaimonWriterCoordinatorTest {
         waitForCoordinator(coordinator);
 
         Mockito.verify(gateway, Mockito.times(2)).sendEvent(Mockito.any(CommitCompleteEvent.class));
-
-        coordinator.close();
-    }
-
-    /**
-     * Restored file info is recommitted and triggers the expected recovery failure, after which a
-     * newer checkpoint is reported and completed normally.
-     */
-    @Test
-    public void testCheckpointAfterRestoredCommitDoesNotFailJob() throws Exception {
-        FileStoreTable table = createFileStoreTable();
-        byte[] coordinatorState = createCoordinatorState(table, CK1);
-        OperatorCoordinator.Context context = Mockito.mock(OperatorCoordinator.Context.class);
-        when(context.getOperatorId()).thenReturn(operatorId);
-        when(context.currentParallelism()).thenReturn(1);
-        when(context.getUserCodeClassloader())
-                .thenReturn(Thread.currentThread().getContextClassLoader());
-        PaimonWriterCoordinator coordinator = createCoordinator(table, context);
-        coordinator.resetToCheckpoint(CK1, coordinatorState);
-        coordinator.start();
-        register(coordinator, 0);
-
-        sendRequest(
-                coordinator,
-                recoveredFileInfoRequest(
-                        CK1, 0, commitUser, committables(table, CK1, GenericRow.of(1, 10L))));
-        waitForCoordinator(coordinator);
-        Mockito.verify(context).failJob(Mockito.any(Throwable.class));
-        assertResults(table, "1, 10");
-
-        sendRequest(coordinator, fileInfoRequest(table, CK2, 0, GenericRow.of(2, 20L)));
-        coordinator.notifyCheckpointComplete(CK2);
-        waitForCoordinator(coordinator);
-
-        Mockito.verify(context, Mockito.times(1)).failJob(Mockito.any(Throwable.class));
-        assertResults(table, "1, 10", "2, 20");
-
-        coordinator.close();
-    }
-
-    /**
-     * At a restored checkpoint, one subtask reports data and another reports an empty recovered
-     * file-info payload.
-     */
-    @Test
-    public void testEmptyRestoredFileInfoCompletesRestoredCheckpoint() throws Exception {
-        FileStoreTable table = createFileStoreTable();
-        byte[] coordinatorState = createCoordinatorState(table, CK1);
-        OperatorCoordinator.Context context = Mockito.mock(OperatorCoordinator.Context.class);
-        when(context.getOperatorId()).thenReturn(operatorId);
-        when(context.currentParallelism()).thenReturn(2);
-        when(context.getUserCodeClassloader())
-                .thenReturn(Thread.currentThread().getContextClassLoader());
-        PaimonWriterCoordinator coordinator = createCoordinator(table, context);
-        coordinator.resetToCheckpoint(CK1, coordinatorState);
-        coordinator.start();
-        register(coordinator, 0);
-        register(coordinator, 1);
-
-        sendRequest(
-                coordinator,
-                recoveredFileInfoRequest(
-                        CK1, 0, commitUser, committables(table, CK1, GenericRow.of(1, 10L))));
-        waitForCoordinator(coordinator);
-        assertThat(table.snapshotManager().latestSnapshotId()).isNull();
-
-        sendRequest(
-                coordinator, recoveredFileInfoRequest(CK1, 1, commitUser, Collections.emptyList()));
-        waitForCoordinator(coordinator);
-
-        Mockito.verify(context).failJob(Mockito.any(Throwable.class));
-        assertResults(table, "1, 10");
-
-        coordinator.close();
-    }
-
-    /**
-     * During recovery to CK2, one recovered request cumulatively carries CK1 committables and the
-     * other recovered request is empty.
-     */
-    @Test
-    public void testEmptyFileInfoCompletesEarlierCheckpointBeforeRestoredCommit() throws Exception {
-        FileStoreTable table = createFileStoreTable();
-        byte[] coordinatorState = createCoordinatorState(table, CK2);
-        OperatorCoordinator.Context context = Mockito.mock(OperatorCoordinator.Context.class);
-        when(context.getOperatorId()).thenReturn(operatorId);
-        when(context.currentParallelism()).thenReturn(2);
-        when(context.getUserCodeClassloader())
-                .thenReturn(Thread.currentThread().getContextClassLoader());
-        PaimonWriterCoordinator coordinator = createCoordinator(table, context);
-        coordinator.resetToCheckpoint(CK2, coordinatorState);
-        coordinator.start();
-        register(coordinator, 0);
-        register(coordinator, 1);
-
-        List<Committable> ck1Subtask0 = committables(table, CK1, GenericRow.of(1, 10L));
-        sendRequest(coordinator, recoveredFileInfoRequest(CK2, 0, commitUser, ck1Subtask0));
-        waitForCoordinator(coordinator);
-        assertThat(table.snapshotManager().latestSnapshotId()).isNull();
-
-        sendRequest(
-                coordinator, recoveredFileInfoRequest(CK2, 1, commitUser, Collections.emptyList()));
-        waitForCoordinator(coordinator);
-
-        Mockito.verify(context).failJob(Mockito.any(Throwable.class));
-        assertResults(table, "1, 10");
 
         coordinator.close();
     }
@@ -721,12 +693,16 @@ public class PaimonWriterCoordinatorTest {
     }
 
     private PaimonWriterCoordinator createCoordinator(FileStoreTable table, int parallelism) {
+        return createCoordinator(table, createContext(parallelism));
+    }
+
+    private OperatorCoordinator.Context createContext(int parallelism) {
         OperatorCoordinator.Context context = Mockito.mock(OperatorCoordinator.Context.class);
         when(context.getOperatorId()).thenReturn(operatorId);
         when(context.currentParallelism()).thenReturn(parallelism);
         when(context.getUserCodeClassloader())
                 .thenReturn(Thread.currentThread().getContextClassLoader());
-        return createCoordinator(table, context);
+        return context;
     }
 
     private PaimonWriterCoordinator createCoordinator(
