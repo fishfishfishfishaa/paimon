@@ -18,7 +18,6 @@
 
 package org.apache.paimon.flink.sink;
 
-import org.apache.paimon.flink.sink.coordinator.CoordinatedFileInfoSender;
 import org.apache.paimon.flink.sink.coordinator.PaimonWriterCoordinator;
 
 import org.apache.flink.runtime.jobgraph.OperatorID;
@@ -66,7 +65,7 @@ public class CommitterCoordinatedFactory<CommitT, GlobalCommitT>
                         .getEnvironment()
                         .getOperatorCoordinatorEventGateway();
         TableWriteOperator<CommitT> operator = writeFactory.createStreamOperator(parameters);
-        operator.setFileInfoSender(new CoordinatedFileInfoSender(gateway, operatorId));
+        operator.setCommitHandler(new CoordinatedCommitHandler(gateway, operatorId));
         parameters.getOperatorEventDispatcher().registerEventHandler(operatorId, operator);
         return (T) operator;
     }

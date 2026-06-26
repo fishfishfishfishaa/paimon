@@ -20,9 +20,6 @@ package org.apache.paimon.flink.sink;
 
 import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.flink.sink.StoreSinkWriteState.StateValueFilter;
-import org.apache.paimon.flink.sink.coordinator.CommitCompleteEvent;
-import org.apache.paimon.flink.sink.coordinator.CoordinatedCommittableState;
-import org.apache.paimon.flink.sink.coordinator.CoordinatedFileInfoSender;
 import org.apache.paimon.flink.sink.coordinator.CoordinatedWriteRestore;
 import org.apache.paimon.flink.sink.coordinator.WriteOperatorCoordinator;
 import org.apache.paimon.flink.utils.RuntimeContextUtils;
@@ -47,10 +44,7 @@ import org.apache.flink.streaming.api.watermark.Watermark;
 import javax.annotation.Nullable;
 
 import java.io.IOException;
-import java.util.Collections;
 import java.util.List;
-
-import static org.apache.paimon.flink.sink.coordinator.CommitterCoordinator.END_INPUT_CHECKPOINT_ID;
 
 /** An abstract class for table write operator. */
 public abstract class TableWriteOperator<IN> extends PrepareCommitOperator<IN, Committable>
@@ -59,7 +53,7 @@ public abstract class TableWriteOperator<IN> extends PrepareCommitOperator<IN, C
     private static final long serialVersionUID = 1L;
 
     protected FileStoreTable table;
-    protected @Nullable CoordinatedFileInfoSender sender;
+    protected CommitHandler commitHandler = CommitHandler.EMPTY;
 
     protected final StoreSinkWrite.Provider storeSinkWriteProvider;
     protected final String initialCommitUser;
@@ -70,7 +64,6 @@ public abstract class TableWriteOperator<IN> extends PrepareCommitOperator<IN, C
     protected transient StoreSinkWrite write;
 
     protected transient @Nullable ConfigRefresher configRefresher;
-    protected transient @Nullable CoordinatedCommittableState coordinatedCommittableState;
 
     public TableWriteOperator(
             StreamOperatorParameters<Committable> parameters,
@@ -90,24 +83,11 @@ public abstract class TableWriteOperator<IN> extends PrepareCommitOperator<IN, C
         int numTasks = RuntimeContextUtils.getNumberOfParallelSubtasks(getRuntimeContext());
         int subtaskId = RuntimeContextUtils.getIndexOfThisSubtask(getRuntimeContext());
         String currentCommitUser = getCommitUser(context);
-        if (sender != null) {
-            sender.setSubtaskId(subtaskId);
-            sender.setAttemptNumber(RuntimeContextUtils.getAttemptNumber(getRuntimeContext()));
-            coordinatedCommittableState = new CoordinatedCommittableState();
-            coordinatedCommittableState.initialize(context);
-            if (context.isRestored()) {
-                long restoredCheckpointId =
-                        context.getRestoredCheckpointId()
-                                .orElseThrow(
-                                        () ->
-                                                new IllegalStateException(
-                                                        "Restored checkpoint id is missing."));
-                List<Committable> committables = committablesForCoordinator();
-                sender.sendRecoveredFileInfoToCoordinator(
-                        restoredCheckpointId, currentCommitUser, committables);
-                coordinatedCommittableState.markAcknowledged(committables);
-            }
-        }
+        commitHandler.initialize(
+                context,
+                subtaskId,
+                RuntimeContextUtils.getAttemptNumber(getRuntimeContext()),
+                currentCommitUser);
         StateValueFilter stateFilter =
                 (tableName, partition, bucket) ->
                         subtaskId == ChannelComputer.select(partition, bucket, numTasks);
@@ -131,16 +111,14 @@ public abstract class TableWriteOperator<IN> extends PrepareCommitOperator<IN, C
         this.writeRestore = writeRestore;
     }
 
-    public void setFileInfoSender(@Nullable CoordinatedFileInfoSender sender) {
-        this.sender = sender;
+    public void setCommitHandler(CommitHandler commitHandler) {
+        this.commitHandler = commitHandler;
     }
 
     @Override
     public void processWatermark(Watermark mark) throws Exception {
         super.processWatermark(mark);
-        if (sender != null) {
-            sender.processWatermark(mark.getTimestamp());
-        }
+        commitHandler.processWatermark(mark.getTimestamp());
     }
 
     protected StoreSinkWriteState createState(
@@ -170,12 +148,7 @@ public abstract class TableWriteOperator<IN> extends PrepareCommitOperator<IN, C
 
         write.snapshotState();
         state.snapshotState();
-        if (coordinatedCommittableState != null) {
-            coordinatedCommittableState.snapshot(context.getCheckpointId());
-        }
-        if (sender != null && !sender.isEndInput()) {
-            sendUnacknowledgedCommittables(context.getCheckpointId());
-        }
+        commitHandler.snapshot(context);
     }
 
     @Override
@@ -194,49 +167,19 @@ public abstract class TableWriteOperator<IN> extends PrepareCommitOperator<IN, C
 
     @Override
     protected void handleCommittables(long checkpointId) {
-        if (sender != null && checkpointId == END_INPUT_CHECKPOINT_ID) {
-            sendUnacknowledgedCommittables(checkpointId);
-        }
+        commitHandler.handleCommittables(checkpointId);
     }
 
     @Override
     protected void collect(Committable committable) {
-        if (sender != null) {
-            rememberCommittable(committable);
-        } else {
+        if (!commitHandler.collect(committable)) {
             super.collect(committable);
         }
     }
 
-    protected void rememberCommittable(Committable committable) {
-        if (coordinatedCommittableState != null) {
-            coordinatedCommittableState.add(committable);
-        }
-    }
-
-    private List<Committable> committablesForCoordinator() {
-        return coordinatedCommittableState == null
-                ? Collections.emptyList()
-                : coordinatedCommittableState.committables();
-    }
-
-    private void sendUnacknowledgedCommittables(long checkpointId) {
-        if (coordinatedCommittableState == null || sender == null) {
-            return;
-        }
-
-        List<Committable> committables = coordinatedCommittableState.unacknowledgedCommittables();
-        sender.sendToCoordinator(checkpointId, committables);
-        coordinatedCommittableState.markAcknowledged(committables);
-    }
-
     @Override
     public void handleOperatorEvent(OperatorEvent event) {
-        if (event instanceof CommitCompleteEvent) {
-            if (coordinatedCommittableState != null) {
-                coordinatedCommittableState.markCommittedUpTo(
-                        ((CommitCompleteEvent) event).checkpointId());
-            }
+        if (commitHandler.handleOperatorEvent(event)) {
             return;
         }
         throw new IllegalArgumentException("Unsupported operator event: " + event.getClass());
