@@ -111,6 +111,7 @@ public abstract class E2eTestBase {
                                                 .getResource("docker-compose.yaml")
                                                 .toURI()))
                         .withEnv("NETWORK_ID", ((Network.NetworkImpl) network).getName())
+                        .withEnv("FLINK_ENV_FILE", flinkEnvFile())
                         .withLogConsumer("jobmanager-1", new LogConsumer(LOG))
                         .withStartupTimeout(Duration.ofMinutes(3))
                         .withLocalCompose(true);
@@ -169,6 +170,10 @@ public abstract class E2eTestBase {
                 jobManager.execInContainer("bash", "-c", "flink --version").getStdout();
         Matcher flinkVersionMatcher = FLINK_VERSION_PATTERN.matcher(flinkVersionCliOut);
         flinkVersion = flinkVersionMatcher.find() ? flinkVersionMatcher.group(1) : null;
+    }
+
+    protected String flinkEnvFile() {
+        return "flink.env";
     }
 
     protected String flinkRestUrl() {

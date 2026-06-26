@@ -57,6 +57,11 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         super(false, false, false, 2);
     }
 
+    @Override
+    protected String flinkEnvFile() {
+        return "flink-pwc.env";
+    }
+
     @Test
     public void testCheckpointCommitWithWriterCoordinator() throws Exception {
         TestContext context = createContext();
