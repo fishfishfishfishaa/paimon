@@ -30,10 +30,7 @@ public class CommitHandler {
     public static final CommitHandler EMPTY = new CommitHandler();
 
     public void initialize(
-            StateInitializationContext context,
-            int subtaskId,
-            int attemptNumber,
-            String commitUser)
+            StateInitializationContext context, int subtaskId, int attemptNumber, String commitUser)
             throws Exception {}
 
     public void processWatermark(long watermark) {}

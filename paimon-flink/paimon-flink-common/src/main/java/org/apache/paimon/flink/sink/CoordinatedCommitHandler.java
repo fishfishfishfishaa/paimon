@@ -45,10 +45,7 @@ public class CoordinatedCommitHandler extends CommitHandler {
 
     @Override
     public void initialize(
-            StateInitializationContext context,
-            int subtaskId,
-            int attemptNumber,
-            String commitUser)
+            StateInitializationContext context, int subtaskId, int attemptNumber, String commitUser)
             throws Exception {
         sender.setSubtaskId(subtaskId);
         sender.setAttemptNumber(attemptNumber);
