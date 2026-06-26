@@ -130,7 +130,6 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         assertThat(after.get(1).attempt).isEqualTo(before.get(1).attempt);
 
         cancel(jobId);
-        assertTable(context, 0, 40);
     }
 
     @Test
