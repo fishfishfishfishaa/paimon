@@ -31,9 +31,7 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Matcher;
@@ -292,19 +290,50 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
     }
 
     private void assertTable(TestContext context, int start, int end) throws Exception {
-        clearCurrentResults();
+        String resultDirectory = "pip30-result-" + UUID.randomUUID();
+        String resultPath = TEST_DATA_DIR + "/" + resultDirectory;
         runBatchSql(
                 "INSERT INTO pip30_result SELECT sequence_id, payload FROM pip30_sink;",
                 context.catalogDdl,
                 "USE CATALOG pip30_catalog;",
                 context.tableDdl,
-                createResultSink("pip30_result", "sequence_id BIGINT, payload STRING"));
+                String.format(
+                        "CREATE TEMPORARY TABLE pip30_result (\n"
+                                + "    sequence_id BIGINT,\n"
+                                + "    payload STRING\n"
+                                + ") WITH (\n"
+                                + "    'connector' = 'filesystem',\n"
+                                + "    'path' = '%s',\n"
+                                + "    'format' = 'csv'\n"
+                                + ");",
+                        resultPath));
 
-        List<String> expected = new ArrayList<>();
+        Map<String, Integer> expected = new HashMap<>();
         for (int i = start; i < end; i++) {
-            expected.add(i + ", value-" + i);
+            expected.compute(i + ",value-" + i, (k, v) -> (v == null ? 0 : v) + 1);
         }
-        checkResult(expected.toArray(new String[0]));
+        assertThat(readRows(resultPath)).isEqualTo(expected);
+    }
+
+    private Map<String, Integer> readRows(String path) throws Exception {
+        Container.ExecResult result =
+                jobManager.execInContainer(
+                        "bash",
+                        "-c",
+                        "if [ -d "
+                                + path
+                                + " ]; then find "
+                                + path
+                                + " -type f ! -name '.*' -exec cat {} +; fi");
+        assertCommandSucceeded("read result files", result);
+
+        Map<String, Integer> rows = new HashMap<>();
+        for (String row : result.getStdout().split("\\R")) {
+            if (!row.trim().isEmpty()) {
+                rows.compute(row.trim(), (k, v) -> (v == null ? 0 : v) + 1);
+            }
+        }
+        return rows;
     }
 
     private void triggerAndWaitForDataCommitted(String jobId, TestContext context)
