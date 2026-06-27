@@ -143,6 +143,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         waitForWriterSubtasks(jobId);
         waitForRecords();
         triggerAndWaitForCompletedCheckpoint(jobId);
+        waitForSnapshot(context, 1);
 
         String writerVertexId = findWriterVertexId(jobId);
         assertSourceAndWriterAreChained(jobId);
@@ -174,6 +175,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         assertThat(after.get(1).attempt).isEqualTo(before.get(1).attempt);
 
         triggerAndWaitForCompletedCheckpoint(jobId);
+        waitForSnapshot(context, 1);
         cancel(jobId);
         assertTable(context, 0, 40);
     }
@@ -240,7 +242,12 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
                         + "    'write-only' = 'true',\n"
                         + "    'sink.committer-coordinator-operator.enabled' = 'true'\n"
                         + ");";
-        return new TestContext(inputDirectory, catalogDdl, sourceDdl, tableDdl);
+        return new TestContext(
+                inputDirectory,
+                catalogDdl,
+                sourceDdl,
+                tableDdl,
+                warehouse + "/default.db/pip30_sink/snapshot");
     }
 
     private String submit(TestContext context) throws Exception {
@@ -294,6 +301,24 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
             expected.add(i + ", value-" + i);
         }
         checkResult(expected.toArray(new String[0]));
+    }
+
+    private void waitForSnapshot(TestContext context, int minSnapshots) throws Exception {
+        waitUntil(
+                () -> {
+                    Container.ExecResult result =
+                            jobManager.execInContainer(
+                                    "bash",
+                                    "-c",
+                                    "find "
+                                            + context.snapshotDirectory
+                                            + " -type f -name 'snapshot-*' 2>/dev/null | wc -l");
+                    if (result.getExitCode() != 0) {
+                        return false;
+                    }
+                    return Integer.parseInt(result.getStdout().trim()) >= minSnapshots;
+                },
+                "Paimon snapshot was not committed.");
     }
 
     private String findWriterVertexId(String jobId) throws Exception {
@@ -602,13 +627,19 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         private final String catalogDdl;
         private final String sourceDdl;
         private final String tableDdl;
+        private final String snapshotDirectory;
 
         private TestContext(
-                String inputDirectory, String catalogDdl, String sourceDdl, String tableDdl) {
+                String inputDirectory,
+                String catalogDdl,
+                String sourceDdl,
+                String tableDdl,
+                String snapshotDirectory) {
             this.inputDirectory = inputDirectory;
             this.catalogDdl = catalogDdl;
             this.sourceDdl = sourceDdl;
             this.tableDdl = tableDdl;
+            this.snapshotDirectory = snapshotDirectory;
         }
     }
 
