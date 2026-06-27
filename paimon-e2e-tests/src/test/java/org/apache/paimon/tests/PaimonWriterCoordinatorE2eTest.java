@@ -142,8 +142,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         waitForJobStatus(jobId, "RUNNING");
         waitForWriterSubtasks(jobId);
         waitForRecords();
-        triggerAndWaitForCompletedCheckpoint(jobId);
-        waitForSnapshot(context, 1);
+        triggerAndWaitForDataCommitted(jobId, context);
 
         String writerVertexId = findWriterVertexId(jobId);
         assertSourceAndWriterAreChained(jobId);
@@ -174,8 +173,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         assertThat(after.get(0).attempt).isGreaterThan(before.get(0).attempt);
         assertThat(after.get(1).attempt).isEqualTo(before.get(1).attempt);
 
-        triggerAndWaitForCompletedCheckpoint(jobId);
-        waitForSnapshot(context, 1);
+        triggerAndWaitForDataCommitted(jobId, context);
         cancel(jobId);
         assertTable(context, 0, 40);
     }
@@ -247,7 +245,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
                 catalogDdl,
                 sourceDdl,
                 tableDdl,
-                warehouse + "/default.db/pip30_sink/snapshot");
+                warehouse + "/default.db/pip30_sink");
     }
 
     private String submit(TestContext context) throws Exception {
@@ -303,22 +301,32 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         checkResult(expected.toArray(new String[0]));
     }
 
-    private void waitForSnapshot(TestContext context, int minSnapshots) throws Exception {
+    private void triggerAndWaitForDataCommitted(String jobId, TestContext context)
+            throws Exception {
         waitUntil(
                 () -> {
-                    Container.ExecResult result =
-                            jobManager.execInContainer(
-                                    "bash",
-                                    "-c",
-                                    "find "
-                                            + context.snapshotDirectory
-                                            + " -type f -name 'snapshot-*' 2>/dev/null | wc -l");
-                    if (result.getExitCode() != 0) {
-                        return false;
-                    }
-                    return Integer.parseInt(result.getStdout().trim()) >= minSnapshots;
+                    triggerAndWaitForCompletedCheckpoint(jobId);
+                    return dataFileCount(context) > 0;
                 },
-                "Paimon snapshot was not committed.");
+                "Paimon data was not committed.");
+    }
+
+    private int dataFileCount(TestContext context) throws Exception {
+        Container.ExecResult result =
+                jobManager.execInContainer(
+                        "bash",
+                        "-c",
+                        "find "
+                                + context.tableDirectory
+                                + " -type f "
+                                + "! -path '*/snapshot/*' "
+                                + "! -path '*/manifest/*' "
+                                + "! -path '*/schema/*' "
+                                + "2>/dev/null | wc -l");
+        if (result.getExitCode() != 0) {
+            return 0;
+        }
+        return Integer.parseInt(result.getStdout().trim());
     }
 
     private String findWriterVertexId(String jobId) throws Exception {
@@ -627,19 +635,19 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         private final String catalogDdl;
         private final String sourceDdl;
         private final String tableDdl;
-        private final String snapshotDirectory;
+        private final String tableDirectory;
 
         private TestContext(
                 String inputDirectory,
                 String catalogDdl,
                 String sourceDdl,
                 String tableDdl,
-                String snapshotDirectory) {
+                String tableDirectory) {
             this.inputDirectory = inputDirectory;
             this.catalogDdl = catalogDdl;
             this.sourceDdl = sourceDdl;
             this.tableDdl = tableDdl;
-            this.snapshotDirectory = snapshotDirectory;
+            this.tableDirectory = tableDirectory;
         }
     }
 
