@@ -198,7 +198,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         waitForWriterSubtasks(restoredJobId);
         writeRecords(context.inputDirectory, 20, 20);
         waitForRecords();
-        triggerAndWaitForCompletedCheckpoint(restoredJobId);
+        triggerAndWaitForDataCommitted(restoredJobId, context);
 
         waitUntil(
                 () ->
