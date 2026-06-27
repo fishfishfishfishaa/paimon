@@ -127,7 +127,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
 
         // 再触发一次成功 checkpoint，验证前一次 abort 的部分提交信息能被下一次 checkpoint 恢复。
         waitForJobStatus(jobId, "RUNNING");
-        triggerAndWaitForCompletedCheckpoint(jobId);
+        triggerAndWaitForDataCommitted(jobId, context);
         Map<Integer, SubtaskAttempt> after = getSubtaskAttempts(jobId, writerVertexId);
         assertThat(after.get(0).attempt).isEqualTo(before.get(0).attempt);
         assertThat(after.get(1).attempt).isEqualTo(before.get(1).attempt);
