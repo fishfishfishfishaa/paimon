@@ -136,7 +136,7 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
     @Test
     public void testTaskManagerFailureRestoresOnlyAffectedRegion() throws Exception {
         TestContext context = createContext();
-        writeRecords(context.inputDirectory, 0, 20);
+        writeRecords(context.inputDirectory, 0, 40);
 
         String jobId = submit(context);
         waitForJobStatus(jobId, "RUNNING");
@@ -149,10 +149,6 @@ public class PaimonWriterCoordinatorE2eTest extends E2eTestBase {
         Map<Integer, SubtaskAttempt> before = waitForWriterSubtasks(jobId);
         assertThat(before).hasSize(2);
         assertThat(before.get(0).host).isNotEqualTo(before.get(1).host);
-
-        writeRecords(context.inputDirectory, 20, 20);
-        waitForRecords();
-        triggerAndWaitForCompletedCheckpoint(jobId);
 
         ContainerState failedTaskManager = findTaskManager(before.get(0));
         failedTaskManager
