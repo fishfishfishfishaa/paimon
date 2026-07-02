@@ -121,6 +121,70 @@ def _entry(partition_row, field_id, index_type, file_name,
                               index_file=index_file)
 
 
+def _install_raw_vector_read_builder(table, vector_column_name, row_id_to_vector,
+                                     calls=None):
+    """Install a fake raw read builder which honors GlobalIndexResult ranges."""
+    import pyarrow as pa
+
+    calls = calls if calls is not None else {}
+
+    class _Plan:
+        def __init__(self, row_ids):
+            self._row_ids = row_ids
+
+        def splits(self):
+            return list(self._row_ids)
+
+    class _Scan:
+        def __init__(self):
+            self._row_ids = []
+
+        def with_global_index_result(self, result):
+            ranges = result.results().to_range_list()
+            calls["global_index_ranges"] = ranges
+            self._row_ids = [
+                row_id
+                for row_id in sorted(row_id_to_vector)
+                if any(r.contains(row_id) for r in ranges)
+            ]
+            calls["candidate_ids"] = list(self._row_ids)
+            return self
+
+        def plan(self):
+            return _Plan(self._row_ids)
+
+    class _Read:
+        def to_arrow(self, splits):
+            row_ids = list(splits)
+            return pa.table({
+                vector_column_name: pa.array(
+                    [row_id_to_vector[row_id] for row_id in row_ids]),
+                "_ROW_ID": pa.array(row_ids, type=pa.int64()),
+            })
+
+    class _Builder:
+        def with_partition_filter(self, predicate):
+            calls["partition_filter"] = predicate
+            return self
+
+        def with_filter(self, predicate):
+            calls["filter"] = predicate
+            return self
+
+        def with_projection(self, projection):
+            calls["projection"] = list(projection)
+            return self
+
+        def new_scan(self):
+            return _Scan()
+
+        def new_read(self):
+            return _Read()
+
+    table.new_read_builder = lambda: _Builder()
+    return calls
+
+
 def _patch_snapshot(testcase, entries, snapshot=None):
     """Stub IndexFileHandler.scan + snapshot resolution."""
 
@@ -1300,6 +1364,164 @@ class VectorSearchFilterTest(unittest.TestCase):
                 search.options,
             )
 
+    def test_refine_factor_reranks_index_candidates_with_raw_vectors(self):
+        from pypaimon.globalindex.vector_search_result import (
+            DictBasedScoredIndexResult,
+        )
+
+        entry = _entry(None, field_id=1, index_type="ivf-pq",
+                       file_name="vec.index", row_range_start=0,
+                       row_range_end=2)
+        table = _StubTable(fields=[self.id_field, self.embedding_field],
+                           entries=[entry])
+        _patch_snapshot(self, [entry])
+        raw_calls = _install_raw_vector_read_builder(
+            table, "embedding", {0: [0.0], 1: [10.0], 2: [20.0]})
+        captured_limits = []
+
+        def _fake_create(index_type, file_io, index_path,
+                         index_io_meta_list, options=None):
+            class _FakeReader:
+                def visit_vector_search(self_inner, vs):
+                    captured_limits.append(vs.limit)
+                    approximate_scores = [(2, 100.0), (1, 50.0), (0, 1.0)]
+                    return _completed_future(
+                        DictBasedScoredIndexResult(dict(approximate_scores[:vs.limit])))
+
+                def close(self_inner):
+                    pass
+
+            return _FakeReader()
+
+        with mock.patch(
+                "pypaimon.table.source.vector_search_read._create_vector_reader",
+                side_effect=_fake_create):
+            result = (
+                VectorSearchBuilderImpl(table)
+                .with_vector_column("embedding")
+                .with_query_vector([0.0])
+                .with_limit(1)
+                .with_option("ivf.refine_factor", "3")
+                .execute_local()
+            )
+
+        self.assertEqual([3], captured_limits)
+        self.assertEqual([Range(0, 2)], raw_calls["global_index_ranges"])
+        self.assertEqual([0, 1, 2], raw_calls["candidate_ids"])
+        self.assertEqual([0], sorted(list(result.results())))
+
+    def test_refine_factor_one_reranks_without_expanding_candidates(self):
+        from pypaimon.globalindex.vector_search_result import (
+            DictBasedScoredIndexResult,
+        )
+
+        entry = _entry(None, field_id=1, index_type="ivf-pq",
+                       file_name="vec.index", row_range_start=0,
+                       row_range_end=2)
+        table = _StubTable(fields=[self.id_field, self.embedding_field],
+                           entries=[entry])
+        _patch_snapshot(self, [entry])
+        raw_calls = _install_raw_vector_read_builder(
+            table, "embedding", {0: [0.0], 1: [10.0], 2: [20.0]})
+        captured_limits = []
+
+        def _fake_create(index_type, file_io, index_path,
+                         index_io_meta_list, options=None):
+            class _FakeReader:
+                def visit_vector_search(self_inner, vs):
+                    captured_limits.append(vs.limit)
+                    return _completed_future(
+                        DictBasedScoredIndexResult({2: 100.0}))
+
+                def close(self_inner):
+                    pass
+
+            return _FakeReader()
+
+        with mock.patch(
+                "pypaimon.table.source.vector_search_read._create_vector_reader",
+                side_effect=_fake_create):
+            result = (
+                VectorSearchBuilderImpl(table)
+                .with_vector_column("embedding")
+                .with_query_vector([0.0])
+                .with_limit(1)
+                .with_option("ivf.refine_factor", "1")
+                .execute_local()
+            )
+
+        self.assertEqual([1], captured_limits)
+        self.assertEqual([Range(2, 2)], raw_calls["global_index_ranges"])
+        self.assertEqual([2], raw_calls["candidate_ids"])
+        self.assertEqual([2], sorted(list(result.results())))
+        self.assertLess(result.score_getter()(2), 1.0)
+
+    def test_refine_factor_query_options_override_table_options(self):
+        from pypaimon.common.options.options import Options
+        from pypaimon.globalindex.vector_search_result import (
+            DictBasedScoredIndexResult,
+        )
+
+        class _Options:
+            options = Options({"ivf.refine_factor": "2"})
+
+        entry = _entry(None, field_id=1, index_type="ivf-pq",
+                       file_name="vec.index", row_range_start=0,
+                       row_range_end=9)
+        table = _StubTable(fields=[self.id_field, self.embedding_field],
+                           entries=[entry])
+        table.options = _Options()
+        _patch_snapshot(self, [entry])
+        _install_raw_vector_read_builder(
+            table, "embedding", {i: [float(i)] for i in range(10)})
+        captured_limits = []
+
+        def _fake_create(index_type, file_io, index_path,
+                         index_io_meta_list, options=None):
+            class _FakeReader:
+                def visit_vector_search(self_inner, vs):
+                    captured_limits.append(vs.limit)
+                    return _completed_future(
+                        DictBasedScoredIndexResult(
+                            {i: float(i) for i in range(vs.limit)}))
+
+                def close(self_inner):
+                    pass
+
+            return _FakeReader()
+
+        with mock.patch(
+                "pypaimon.table.source.vector_search_read._create_vector_reader",
+                side_effect=_fake_create):
+            (
+                VectorSearchBuilderImpl(table)
+                .with_vector_column("embedding")
+                .with_query_vector([0.0])
+                .with_limit(1)
+                .with_option("ivf.refine_factor", "3")
+                .execute_local()
+            )
+
+        self.assertEqual([3], captured_limits)
+
+    def test_refine_factor_validation(self):
+        entry = _entry(None, field_id=1, index_type="ivf-pq",
+                       file_name="vec.index", row_range_start=0,
+                       row_range_end=2)
+        table = _StubTable(fields=[self.id_field, self.embedding_field],
+                           entries=[entry])
+        _patch_snapshot(self, [entry])
+
+        with self.assertRaisesRegex(ValueError, "refine factor must be positive"):
+            (
+                VectorSearchBuilderImpl(table)
+                .with_vector_column("embedding")
+                .with_query_vector([0.0])
+                .with_limit(1)
+                .with_option("refine_factor", "0")
+                .execute_local()
+            )
+
     def test_scanner_threads_external_path_to_btree_reader(self):
         """GlobalIndexScanner (backing _pre_filter) must thread external_path
         onto the GlobalIndexIOMeta handed to the btree reader factory."""
@@ -1968,6 +2190,23 @@ class HybridSearchBuilderTest(unittest.TestCase):
             builder.route_builders()
         self.assertIn("full-text routes", str(ctx.exception))
 
+    def test_hybrid_search_rejects_full_text_route_options(self):
+        from pypaimon.table.source.hybrid_search_builder import (
+            HybridSearchBuilderImpl,
+        )
+
+        id_field = _field(0, "id")
+        content = _field(1, "content", "STRING")
+        table = _StubTable(fields=[id_field, content], entries=[])
+
+        with self.assertRaises(ValueError) as ctx:
+            HybridSearchBuilderImpl(table).add_full_text_route(
+                '{"match":{"column":"content","terms":"paimon search"}}',
+                10,
+                options={"some.option": "x"})
+        self.assertIn("Full-text hybrid route options are not supported yet",
+                      str(ctx.exception))
+
     def test_hybrid_search_partition_filter_prunes_full_text_route(self):
         from pypaimon.table.source.hybrid_search_builder import (
             HybridSearchBuilderImpl,
@@ -2125,6 +2364,60 @@ class VectorSearchManySplitsTest(unittest.TestCase):
 
         raw_read.assert_called_once()
         self.assertEqual([1, 8], sorted(list(result.results())))
+
+    def test_batch_merges_raw_search_results(self):
+        from pypaimon.globalindex.global_index_reader import GlobalIndexReader
+        from pypaimon.globalindex.vector_search_result import (
+            DictBasedScoredIndexResult,
+        )
+        from pypaimon.table.source.vector_search_read import (
+            BatchVectorSearchReadImpl,
+        )
+        from pypaimon.table.source.vector_search_split import (
+            IndexVectorSearchSplit,
+            RawVectorSearchSplit,
+        )
+
+        embedding_field = _field(1, "embedding", "FLOAT")
+        entry = _entry(None, field_id=1, index_type="lumina-vector-ann",
+                       file_name="vec.index",
+                       row_range_start=0, row_range_end=4)
+        table = _StubTable(fields=[embedding_field], entries=[entry])
+
+        def _fake_create(index_type, file_io, index_path,
+                         index_io_meta_list, options=None):
+            class _FakeReader(GlobalIndexReader):
+                def visit_vector_search(self_inner, vs):
+                    row_id = int(vs.vector[0])
+                    return _completed_future(
+                        DictBasedScoredIndexResult({row_id: 0.5}))
+
+                def close(self_inner):
+                    pass
+            return _FakeReader()
+
+        split = IndexVectorSearchSplit(
+            row_range_start=0,
+            row_range_end=4,
+            vector_index_files=[entry.index_file],
+        )
+        raw = RawVectorSearchSplit([Range(5, 9)], [], "lumina-vector-ann")
+
+        with mock.patch(
+                "pypaimon.table.source.vector_search_read._create_vector_reader",
+                side_effect=_fake_create):
+            reader = BatchVectorSearchReadImpl(
+                table, limit=5, vector_column=embedding_field,
+                query_vectors=[[1.0], [2.0]], filter_=None)
+            with mock.patch.object(
+                    reader, "_read_raw_search",
+                    return_value=DictBasedScoredIndexResult({8: 0.9})) as raw_read:
+                results = reader.read_batch([split, raw])
+
+        # The raw fallback must be merged into EACH query, not dropped.
+        self.assertEqual(2, raw_read.call_count)
+        self.assertEqual([1, 8], sorted(list(results[0].results())))
+        self.assertEqual([2, 8], sorted(list(results[1].results())))
 
     def test_read_uses_empty_index_prefilter_when_scalar_index_missing(self):
         from pypaimon.table.source.vector_search_read import VectorSearchReadImpl
@@ -2341,6 +2634,7 @@ class BatchVectorSearchTest(unittest.TestCase):
     """Batch vector search returns one result per query vector, in input order."""
 
     def test_batch_returns_per_query_results_in_order(self):
+        from pypaimon.globalindex.global_index_reader import GlobalIndexReader
         from pypaimon.globalindex.vector_search_result import (
             DictBasedScoredIndexResult,
         )
@@ -2355,11 +2649,12 @@ class BatchVectorSearchTest(unittest.TestCase):
         table = _StubTable(fields=[embedding_field], entries=[entry])
         _patch_snapshot(self, [entry])
 
-        # The fake reader routes each query vector to a distinct row id derived
-        # from the vector itself, so result i must reflect query_vectors[i].
+        # A reader implementing only single search exercises the default batch
+        # fan-out; it routes each query vector to a row id derived from the
+        # vector itself, so result i must reflect query_vectors[i].
         def _fake_create(index_type, file_io, index_path,
                          index_io_meta_list, options=None):
-            class _FakeReader:
+            class _FakeReader(GlobalIndexReader):
                 def visit_vector_search(self_inner, vs):
                     row_id = int(vs.vector[0])
                     return _completed_future(
@@ -2367,12 +2662,6 @@ class BatchVectorSearchTest(unittest.TestCase):
 
                 def close(self_inner):
                     pass
-
-                def __enter__(self_inner):
-                    return self_inner
-
-                def __exit__(self_inner, *a):
-                    return False
             return _FakeReader()
 
         query_vectors = [[10.0], [20.0], [30.0]]
@@ -2395,6 +2684,115 @@ class BatchVectorSearchTest(unittest.TestCase):
         # Different query vectors yield different results.
         self.assertNotEqual(
             list(results[0].results()), list(results[1].results()))
+
+    def test_batch_uses_reader_native_batch_when_available(self):
+        from pypaimon.globalindex.global_index_reader import GlobalIndexReader
+        from pypaimon.globalindex.vector_search_result import (
+            DictBasedScoredIndexResult,
+        )
+        from pypaimon.table.source.batch_vector_search_builder import (
+            BatchVectorSearchBuilderImpl,
+        )
+
+        embedding_field = _field(1, "embedding", "FLOAT")
+        entry = _entry(None, field_id=1, index_type="lumina-vector-ann",
+                       file_name="vec.index",
+                       row_range_start=0, row_range_end=99)
+        table = _StubTable(fields=[embedding_field], entries=[entry])
+        _patch_snapshot(self, [entry])
+
+        calls = {"single": 0, "batch": 0}
+
+        # A reader that implements native batch must be driven through one
+        # batch call per split, not per-vector single calls.
+        def _fake_create(index_type, file_io, index_path,
+                         index_io_meta_list, options=None):
+            class _FakeReader(GlobalIndexReader):
+                def visit_vector_search(self_inner, vs):
+                    calls["single"] += 1
+                    return _completed_future(
+                        DictBasedScoredIndexResult({int(vs.vector[0]): 1.0}))
+
+                def visit_batch_vector_search(self_inner, bvs):
+                    calls["batch"] += 1
+                    return _completed_future([
+                        DictBasedScoredIndexResult({int(bvs.vectors[i][0]): 1.0})
+                        for i in range(bvs.vector_count)
+                    ])
+
+                def close(self_inner):
+                    pass
+            return _FakeReader()
+
+        query_vectors = [[10.0], [20.0], [30.0]]
+        with mock.patch(
+                "pypaimon.table.source.vector_search_read._create_vector_reader",
+                side_effect=_fake_create):
+            results = (
+                BatchVectorSearchBuilderImpl(table)
+                .with_vector_column("embedding")
+                .with_query_vectors(query_vectors)
+                .with_limit(5)
+                .execute_batch_local()
+            )
+
+        self.assertEqual(calls["batch"], 1)
+        self.assertEqual(calls["single"], 0)
+        self.assertEqual(len(results), len(query_vectors))
+        for i, query_vector in enumerate(query_vectors):
+            self.assertTrue(results[i].results().contains(int(query_vector[0])))
+
+    def test_batch_refine_factor_reranks_each_query(self):
+        from pypaimon.globalindex.global_index_reader import GlobalIndexReader
+        from pypaimon.globalindex.vector_search_result import (
+            DictBasedScoredIndexResult,
+        )
+        from pypaimon.table.source.batch_vector_search_builder import (
+            BatchVectorSearchBuilderImpl,
+        )
+
+        embedding_field = _field(1, "embedding", "FLOAT")
+        entry = _entry(None, field_id=1, index_type="ivf-pq",
+                       file_name="vec.index",
+                       row_range_start=0, row_range_end=2)
+        table = _StubTable(fields=[embedding_field], entries=[entry])
+        _patch_snapshot(self, [entry])
+        _install_raw_vector_read_builder(
+            table, "embedding", {0: [0.0], 1: [10.0], 2: [20.0]})
+        captured_limits = []
+
+        def _fake_create(index_type, file_io, index_path,
+                         index_io_meta_list, options=None):
+            class _FakeReader(GlobalIndexReader):
+                def visit_batch_vector_search(self_inner, bvs):
+                    captured_limits.append(bvs.limit)
+                    approximate_scores = [(2, 100.0), (1, 50.0), (0, 1.0)]
+                    return _completed_future([
+                        DictBasedScoredIndexResult(
+                            dict(approximate_scores[:bvs.limit]))
+                        for _ in range(bvs.vector_count)
+                    ])
+
+                def close(self_inner):
+                    pass
+
+            return _FakeReader()
+
+        with mock.patch(
+                "pypaimon.table.source.vector_search_read._create_vector_reader",
+                side_effect=_fake_create):
+            results = (
+                BatchVectorSearchBuilderImpl(table)
+                .with_vector_column("embedding")
+                .with_query_vectors([[0.0], [20.0]])
+                .with_limit(1)
+                .with_option("ivf.refine_factor", "3")
+                .execute_batch_local()
+            )
+
+        self.assertEqual([3], captured_limits)
+        self.assertEqual([0], sorted(list(results[0].results())))
+        self.assertEqual([2], sorted(list(results[1].results())))
 
     def test_batch_empty_splits_returns_empty_per_query(self):
         from pypaimon.table.source.batch_vector_search_builder import (
