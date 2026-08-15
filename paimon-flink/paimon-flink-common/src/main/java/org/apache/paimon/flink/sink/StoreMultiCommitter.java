@@ -39,6 +39,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
+import static org.apache.paimon.utils.Preconditions.checkArgument;
+
 /**
  * {@link StoreMultiCommitter} for multiple dynamic store. During the commit process, it will group
  * the WrappedManifestCommittables by their table identifier and use different committers to commit
@@ -141,6 +143,26 @@ public class StoreMultiCommitter
     }
 
     @Override
+    public WrappedManifestCommittable merge(
+            WrappedManifestCommittable target, WrappedManifestCommittable source) {
+        checkArgument(
+                target.checkpointId() == source.checkpointId(),
+                "Cannot merge committables from different checkpoints %s and %s.",
+                target.checkpointId(),
+                source.checkpointId());
+        for (Map.Entry<Identifier, ManifestCommittable> entry :
+                source.manifestCommittables().entrySet()) {
+            ManifestCommittable previous = target.manifestCommittables().get(entry.getKey());
+            if (previous == null) {
+                target.putManifestCommittable(entry.getKey(), entry.getValue());
+            } else {
+                StoreCommitter.mergeManifestCommittables(previous, entry.getValue());
+            }
+        }
+        return target;
+    }
+
+    @Override
     public void commit(List<WrappedManifestCommittable> committables)
             throws IOException, InterruptedException {
         if (committables.isEmpty()) {
@@ -185,6 +207,11 @@ public class StoreMultiCommitter
                                     partitionMarkDoneRecoverFromState);
         }
         return result;
+    }
+
+    @Override
+    public long checkpointId(WrappedManifestCommittable globalCommittable) {
+        return globalCommittable.checkpointId();
     }
 
     private Map<Identifier, List<ManifestCommittable>> groupByTable(

@@ -41,6 +41,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.apache.paimon.utils.Preconditions.checkArgument;
+
 /** {@link Committer} for dynamic store. */
 public class StoreCommitter implements Committer<Committable, ManifestCommittable> {
 
@@ -107,6 +109,25 @@ public class StoreCommitter implements Committer<Committable, ManifestCommittabl
     }
 
     @Override
+    public ManifestCommittable merge(ManifestCommittable target, ManifestCommittable source) {
+        checkArgument(
+                target.identifier() == source.identifier(),
+                "Cannot merge committables from different checkpoints %s and %s.",
+                target.identifier(),
+                source.identifier());
+        return mergeManifestCommittables(target, source);
+    }
+
+    static ManifestCommittable mergeManifestCommittables(
+            ManifestCommittable target, ManifestCommittable source) {
+        for (CommitMessage commitMessage : source.fileCommittables()) {
+            target.addFileCommittable(commitMessage);
+        }
+        source.properties().forEach(target::addProperty);
+        return target;
+    }
+
+    @Override
     public void commit(List<ManifestCommittable> committables)
             throws IOException, InterruptedException {
         commit.commitMultiple(committables, false);
@@ -125,6 +146,11 @@ public class StoreCommitter implements Committer<Committable, ManifestCommittabl
         commitListeners.notifyCommittable(globalCommittables, partitionMarkDoneRecoverFromState);
 
         return committed;
+    }
+
+    @Override
+    public long checkpointId(ManifestCommittable globalCommittable) {
+        return globalCommittable.identifier();
     }
 
     @Override

@@ -25,16 +25,19 @@ import org.apache.paimon.utils.SerializableSupplier;
 
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
+import org.apache.flink.api.common.typeutils.base.BooleanSerializer;
 import org.apache.flink.api.common.typeutils.base.array.BytePrimitiveArraySerializer;
 import org.apache.flink.streaming.api.operators.util.SimpleVersionedListState;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
  * A {@link CommittableStateManager} which stores uncommitted {@link ManifestCommittable}s in state.
  *
- * <p>When the job restarts, these {@link ManifestCommittable}s will be restored and committed.
+ * <p>When the job restarts, regular checkpoint committables are restored and committed. An
+ * incomplete END_INPUT committable remains pending until the operator receives complete end input.
  */
 public class RestoreCommittableStateManager<GlobalCommitT>
         implements CommittableStateManager<GlobalCommitT> {
@@ -49,6 +52,9 @@ public class RestoreCommittableStateManager<GlobalCommitT>
     /** GlobalCommitT state of this job. Used to filter out previous successful commits. */
     private ListState<GlobalCommitT> streamingCommitterState;
 
+    /** Whether every committer operator completed end input before the restored checkpoint. */
+    private ListState<Boolean> completeEndInputState;
+
     public RestoreCommittableStateManager(
             SerializableSupplier<VersionedSerializer<GlobalCommitT>> committableSerializer,
             boolean partitionMarkDoneRecoverFromState) {
@@ -57,8 +63,23 @@ public class RestoreCommittableStateManager<GlobalCommitT>
     }
 
     @Override
-    public void initializeState(Committer.Context context, Committer<?, GlobalCommitT> committer)
-            throws Exception {
+    public List<GlobalCommitT> initializeState(
+            Committer.Context context, Committer<?, GlobalCommitT> committer) throws Exception {
+        completeEndInputState =
+                context.stateStore()
+                        .getUnionListState(
+                                new ListStateDescriptor<>(
+                                        "streaming_committer_complete_end_input_state",
+                                        BooleanSerializer.INSTANCE));
+        boolean hasCompleteEndInputState = false;
+        boolean restoredCompleteEndInput = true;
+        for (Boolean value : completeEndInputState.get()) {
+            hasCompleteEndInputState = true;
+            restoredCompleteEndInput &= Boolean.TRUE.equals(value);
+        }
+        restoredCompleteEndInput &= hasCompleteEndInputState;
+        completeEndInputState.clear();
+
         streamingCommitterState =
                 new SimpleVersionedListState<>(
                         context.stateStore()
@@ -70,7 +91,21 @@ public class RestoreCommittableStateManager<GlobalCommitT>
         List<GlobalCommitT> restored = new ArrayList<>();
         streamingCommitterState.get().forEach(restored::add);
         streamingCommitterState.clear();
+
+        List<GlobalCommitT> pendingEndInput = new ArrayList<>();
+        if (!restoredCompleteEndInput) {
+            restored.removeIf(
+                    committable -> {
+                        if (committer.checkpointId(committable)
+                                == CommitterOperator.END_INPUT_CHECKPOINT_ID) {
+                            pendingEndInput.add(committable);
+                            return true;
+                        }
+                        return false;
+                    });
+        }
         recover(restored, committer);
+        return pendingEndInput;
     }
 
     protected int recover(List<GlobalCommitT> committables, Committer<?, GlobalCommitT> committer)
@@ -79,7 +114,9 @@ public class RestoreCommittableStateManager<GlobalCommitT>
     }
 
     @Override
-    public void snapshotState(List<GlobalCommitT> committables) throws Exception {
+    public void snapshotState(List<GlobalCommitT> committables, boolean completeEndInput)
+            throws Exception {
         streamingCommitterState.update(committables);
+        completeEndInputState.update(Collections.singletonList(completeEndInput));
     }
 }
