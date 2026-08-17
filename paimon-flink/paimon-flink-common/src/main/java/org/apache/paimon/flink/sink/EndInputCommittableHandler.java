@@ -18,8 +18,11 @@
 
 package org.apache.paimon.flink.sink;
 
+/** Handler for endinput. */
 public interface EndInputCommittableHandler<GlobalCommitT> {
+    /** Whether {@link GlobalCommitT} is endinput. */
     boolean isEndInput(GlobalCommitT committable);
 
+    /** Merge committable for EndInput. */
     GlobalCommitT merge(GlobalCommitT globalCommitT, GlobalCommitT committable);
 }
