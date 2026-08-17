@@ -106,8 +106,7 @@ public class RestoreCommittableStateManager<GlobalCommitT>
                             } else {
                                 pendingEndInput.set(
                                         0,
-                                        endInputHandler.merge(
-                                                pendingEndInput.get(0), committable));
+                                        endInputHandler.merge(pendingEndInput.get(0), committable));
                             }
                             return true;
                         }

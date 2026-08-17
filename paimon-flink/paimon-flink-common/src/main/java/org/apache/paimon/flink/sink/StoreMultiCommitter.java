@@ -55,8 +55,7 @@ public class StoreMultiCommitter
 
                 @Override
                 public boolean isEndInput(WrappedManifestCommittable committable) {
-                    return committable.checkpointId()
-                            == CommitterOperator.END_INPUT_CHECKPOINT_ID;
+                    return committable.checkpointId() == CommitterOperator.END_INPUT_CHECKPOINT_ID;
                 }
 
                 @Override
