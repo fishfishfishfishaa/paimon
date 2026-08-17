@@ -18,11 +18,17 @@
 
 package org.apache.paimon.flink.sink;
 
-/** Handler for endinput. */
-public interface EndInputCommittableHandler<GlobalCommitT> {
-    /** Whether {@link GlobalCommitT} is endinput. */
+import java.io.Serializable;
+
+/** Operations required to keep incomplete end-input committables pending during recovery. */
+public interface EndInputCommittableHandler<GlobalCommitT> extends Serializable {
+
+    /** Returns whether the committable belongs to end input. */
     boolean isEndInput(GlobalCommitT committable);
 
-    /** Merge committable for EndInput. */
-    GlobalCommitT merge(GlobalCommitT globalCommitT, GlobalCommitT committable);
+    /**
+     * Merges two restored end-input committables without rebuilding them or refreshing watermark
+     * metadata.
+     */
+    GlobalCommitT merge(GlobalCommitT target, GlobalCommitT source);
 }
