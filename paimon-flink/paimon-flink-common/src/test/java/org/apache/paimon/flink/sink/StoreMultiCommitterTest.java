@@ -184,7 +184,8 @@ class StoreMultiCommitterTest {
             source.putManifestCommittable(
                     secondTable, new ManifestCommittable(checkpointId, Long.MIN_VALUE));
 
-            WrappedManifestCommittable merged = committer.merge(target, source);
+            WrappedManifestCommittable merged =
+                    StoreMultiCommitter.END_INPUT_HANDLER.merge(target, source);
 
             assertThat(merged).isSameAs(target);
             assertThat(merged.manifestCommittables()).containsOnlyKeys(firstTable, secondTable);
@@ -654,7 +655,9 @@ class StoreMultiCommitterTest {
                         initialCommitUser,
                         context -> new StoreMultiCommitter(catalogLoader, context),
                         new RestoreAndFailCommittableStateManager<>(
-                                WrappedManifestCommittableSerializer::new, true));
+                                WrappedManifestCommittableSerializer::new,
+                                true,
+                                StoreMultiCommitter.END_INPUT_HANDLER));
         return createTestHarness(operator);
     }
 

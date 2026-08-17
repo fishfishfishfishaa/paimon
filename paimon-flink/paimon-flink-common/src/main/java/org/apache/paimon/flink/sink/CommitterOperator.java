@@ -152,10 +152,10 @@ public class CommitterOperator<CommitT, GlobalCommitT> extends AbstractStreamOpe
         List<GlobalCommitT> pendingEndInputCommittables =
                 committableStateManager.initializeState(committerContext, committer);
         for (GlobalCommitT committable : pendingEndInputCommittables) {
-            GlobalCommitT previous = committablesPerCheckpoint.get(END_INPUT_CHECKPOINT_ID);
-            committablesPerCheckpoint.put(
-                    END_INPUT_CHECKPOINT_ID,
-                    previous == null ? committable : committer.merge(previous, committable));
+            Preconditions.checkState(
+                    !committablesPerCheckpoint.containsKey(END_INPUT_CHECKPOINT_ID),
+                    "State manager returned multiple pending end-input committables.");
+            committablesPerCheckpoint.put(END_INPUT_CHECKPOINT_ID, committable);
         }
     }
 

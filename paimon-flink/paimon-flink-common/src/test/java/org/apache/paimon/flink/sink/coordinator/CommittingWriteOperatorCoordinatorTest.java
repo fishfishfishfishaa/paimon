@@ -1298,11 +1298,6 @@ public class CommittingWriteOperatorCoordinatorTest extends CommitterOperatorTes
         }
 
         @Override
-        public ManifestCommittable merge(ManifestCommittable target, ManifestCommittable source) {
-            return delegate.merge(target, source);
-        }
-
-        @Override
         public void commit(List<ManifestCommittable> globalCommittables)
                 throws IOException, InterruptedException {
             delegate.commit(globalCommittables);
@@ -1316,11 +1311,6 @@ public class CommittingWriteOperatorCoordinatorTest extends CommitterOperatorTes
                 throws IOException {
             return delegate.filterAndCommit(
                     globalCommittables, checkAppendFiles, partitionMarkDoneRecoverFromState);
-        }
-
-        @Override
-        public long checkpointId(ManifestCommittable globalCommittable) {
-            return delegate.checkpointId(globalCommittable);
         }
 
         @Override

@@ -46,6 +46,27 @@ import static org.apache.paimon.utils.Preconditions.checkArgument;
 /** {@link Committer} for dynamic store. */
 public class StoreCommitter implements Committer<Committable, ManifestCommittable> {
 
+    public static final EndInputCommittableHandler<ManifestCommittable> END_INPUT_HANDLER =
+            new EndInputCommittableHandler<ManifestCommittable>() {
+                private static final long serialVersionUID = 1L;
+
+                @Override
+                public boolean isEndInput(ManifestCommittable committable) {
+                    return committable.identifier() == CommitterOperator.END_INPUT_CHECKPOINT_ID;
+                }
+
+                @Override
+                public ManifestCommittable merge(
+                        ManifestCommittable target, ManifestCommittable source) {
+                    checkArgument(
+                            target.identifier() == source.identifier(),
+                            "Cannot merge committables from different checkpoints %s and %s.",
+                            target.identifier(),
+                            source.identifier());
+                    return mergeManifestCommittables(target, source);
+                }
+            };
+
     private final TableCommitImpl commit;
     @Nullable private final CommitterMetrics committerMetrics;
     private final CommitListeners commitListeners;
@@ -108,16 +129,6 @@ public class StoreCommitter implements Committer<Committable, ManifestCommittabl
         return manifestCommittable;
     }
 
-    @Override
-    public ManifestCommittable merge(ManifestCommittable target, ManifestCommittable source) {
-        checkArgument(
-                target.identifier() == source.identifier(),
-                "Cannot merge committables from different checkpoints %s and %s.",
-                target.identifier(),
-                source.identifier());
-        return mergeManifestCommittables(target, source);
-    }
-
     static ManifestCommittable mergeManifestCommittables(
             ManifestCommittable target, ManifestCommittable source) {
         for (CommitMessage commitMessage : source.fileCommittables()) {
@@ -146,11 +157,6 @@ public class StoreCommitter implements Committer<Committable, ManifestCommittabl
         commitListeners.notifyCommittable(globalCommittables, partitionMarkDoneRecoverFromState);
 
         return committed;
-    }
-
-    @Override
-    public long checkpointId(ManifestCommittable globalCommittable) {
-        return globalCommittable.identifier();
     }
 
     @Override

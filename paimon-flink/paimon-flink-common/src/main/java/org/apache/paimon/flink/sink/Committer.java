@@ -47,9 +47,6 @@ public interface Committer<CommitT, GlobalCommitT> extends AutoCloseable {
     GlobalCommitT combine(
             long checkpointId, long watermark, GlobalCommitT t, List<CommitT> committables);
 
-    /** Merges two aggregated committables belonging to the same checkpoint. */
-    GlobalCommitT merge(GlobalCommitT target, GlobalCommitT source);
-
     /** Commits the given {@link GlobalCommitT}. */
     void commit(List<GlobalCommitT> globalCommittables) throws IOException, InterruptedException;
 
@@ -62,9 +59,6 @@ public interface Committer<CommitT, GlobalCommitT> extends AutoCloseable {
             boolean checkAppendFiles,
             boolean partitionMarkDoneRecoverFromState)
             throws IOException;
-
-    /** Returns the checkpoint id of the given aggregated committable. */
-    long checkpointId(GlobalCommitT globalCommittable);
 
     Map<Long, List<CommitT>> groupByCheckpoint(Collection<CommitT> committables);
 

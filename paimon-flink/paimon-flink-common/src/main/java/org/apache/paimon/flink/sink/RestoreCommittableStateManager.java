@@ -49,6 +49,8 @@ public class RestoreCommittableStateManager<GlobalCommitT>
 
     private final boolean partitionMarkDoneRecoverFromState;
 
+    private final EndInputCommittableHandler<GlobalCommitT> endInputHandler;
+
     /** GlobalCommitT state of this job. Used to filter out previous successful commits. */
     private ListState<GlobalCommitT> streamingCommitterState;
 
@@ -57,9 +59,11 @@ public class RestoreCommittableStateManager<GlobalCommitT>
 
     public RestoreCommittableStateManager(
             SerializableSupplier<VersionedSerializer<GlobalCommitT>> committableSerializer,
-            boolean partitionMarkDoneRecoverFromState) {
+            boolean partitionMarkDoneRecoverFromState,
+            EndInputCommittableHandler<GlobalCommitT> endInputHandler) {
         this.committableSerializer = committableSerializer;
         this.partitionMarkDoneRecoverFromState = partitionMarkDoneRecoverFromState;
+        this.endInputHandler = endInputHandler;
     }
 
     @Override
@@ -96,9 +100,15 @@ public class RestoreCommittableStateManager<GlobalCommitT>
         if (!restoredCompleteEndInput) {
             restored.removeIf(
                     committable -> {
-                        if (committer.checkpointId(committable)
-                                == CommitterOperator.END_INPUT_CHECKPOINT_ID) {
-                            pendingEndInput.add(committable);
+                        if (endInputHandler.isEndInput(committable)) {
+                            if (pendingEndInput.isEmpty()) {
+                                pendingEndInput.add(committable);
+                            } else {
+                                pendingEndInput.set(
+                                        0,
+                                        endInputHandler.merge(
+                                                pendingEndInput.get(0), committable));
+                            }
                             return true;
                         }
                         return false;

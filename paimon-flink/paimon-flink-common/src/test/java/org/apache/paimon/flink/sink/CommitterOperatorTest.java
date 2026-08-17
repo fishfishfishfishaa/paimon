@@ -782,7 +782,9 @@ public class CommitterOperatorTest extends CommitterOperatorTestBase {
                         table,
                         null,
                         new RestoreAndFailCommittableStateManager<>(
-                                ManifestCommittableSerializer::new, true));
+                                ManifestCommittableSerializer::new,
+                                true,
+                                StoreCommitter.END_INPUT_HANDLER));
         OneInputStreamOperatorTestHarness<Committable, Committable> testHarness =
                 createTestHarness(operatorFactory);
         testHarness.open();
@@ -885,7 +887,8 @@ public class CommitterOperatorTest extends CommitterOperatorTestBase {
                         null,
                         new RestoreAndFailCommittableStateManager<>(
                                 ManifestCommittableSerializer::new,
-                                partitionMarkDownRecoverFromState));
+                                partitionMarkDownRecoverFromState,
+                                StoreCommitter.END_INPUT_HANDLER));
         return createTestHarness(operatorFactory);
     }
 
