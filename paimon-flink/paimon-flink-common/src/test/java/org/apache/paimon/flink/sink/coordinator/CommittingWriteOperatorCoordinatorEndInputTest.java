@@ -636,8 +636,9 @@ public class CommittingWriteOperatorCoordinatorEndInputTest extends CommitterOpe
                 boolean checkAppendFiles,
                 boolean partitionMarkDoneRecoverFromState)
                 throws IOException {
-            return delegate.filterAndCommit(
+            delegate.filterAndCommit(
                     committables, checkAppendFiles, partitionMarkDoneRecoverFromState);
+            throw new IOException("Commit succeeded before the simulated failure");
         }
 
         @Override
