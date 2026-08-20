@@ -406,6 +406,42 @@ public class CommittingWriteOperatorCoordinatorEndInputTest extends CommitterOpe
 
     @Timeout(value = 30, unit = TimeUnit.SECONDS)
     @Test
+    public void testRegionRestoreDoesNotRecommitEndInputAlreadyCommitted() throws Exception {
+        FileStoreTable table = createUnawareBucketTable();
+        CommittingWriteOperatorCoordinator coordinator = createCoordinator(table, 1);
+        coordinator.start();
+        coordinator.waitProcessAllActions();
+
+        Committable endInput = committable(table, Long.MAX_VALUE, 1);
+        coordinator.handleEventFromOperator(0, 0, event(endInput));
+        coordinator.handleEventFromOperator(0, 0, emptyEvent(1L));
+        coordinator.notifyCheckpointComplete(1L);
+        coordinator.waitProcessAllActions();
+
+        assertResults(table, "1, 1");
+        long committedSnapshotId = table.snapshotManager().latestSnapshotId();
+
+        coordinator.subtaskReset(0, 1L);
+        coordinator.handleEventFromOperator(
+                0,
+                1,
+                restoreEventEntries(
+                        1L,
+                        new CheckpointCommittables(
+                                Long.MAX_VALUE,
+                                Collections.singletonList(endInput),
+                                Long.MIN_VALUE)));
+        coordinator.handleEventFromOperator(0, 1, emptyEvent(2L));
+        coordinator.notifyCheckpointComplete(2L);
+        coordinator.waitProcessAllActions();
+
+        assertResults(table, "1, 1");
+        assertThat(table.snapshotManager().latestSnapshotId()).isEqualTo(committedSnapshotId);
+        coordinator.close();
+    }
+
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    @Test
     public void testDuplicateEndInputEventDoesNotDuplicateCommittables() throws Exception {
         FileStoreTable table = createUnawareBucketTable();
         CommittingWriteOperatorCoordinator coordinator = createCoordinator(table, 2);

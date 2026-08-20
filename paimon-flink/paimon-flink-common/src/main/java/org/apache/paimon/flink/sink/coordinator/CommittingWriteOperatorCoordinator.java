@@ -238,13 +238,16 @@ public class CommittingWriteOperatorCoordinator implements OperatorCoordinator {
                                     committer,
                                     includeEndInput),
                             watermarkPerCheckpoint,
-                            committables -> {
-                                try {
-                                    committer.commit(committables);
-                                } catch (Exception e) {
-                                    throw new RuntimeException(e);
-                                }
-                            });
+                            includeEndInput
+                                    ? committables ->
+                                            committer.filterAndCommit(committables, false, true)
+                                    : committables -> {
+                                        try {
+                                            committer.commit(committables);
+                                        } catch (Exception e) {
+                                            throw new RuntimeException(e);
+                                        }
+                                    });
                 },
                 "completing checkpoint %d",
                 checkpointId);
