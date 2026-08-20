@@ -77,6 +77,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doAnswer;
@@ -176,7 +177,7 @@ public class CommittingWriteOperatorCoordinatorTest extends CommitterOperatorTes
                             return null;
                         })
                 .when(committer)
-                .commit(anyList());
+                .filterAndCommit(anyList(), anyBoolean(), anyBoolean());
         doAnswer(
                         invocation -> {
                             closeCalls.incrementAndGet();
