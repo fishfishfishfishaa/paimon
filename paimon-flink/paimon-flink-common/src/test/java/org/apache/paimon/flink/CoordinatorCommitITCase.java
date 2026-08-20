@@ -25,6 +25,7 @@ import org.apache.paimon.flink.sink.FlinkSinkBuilder;
 import org.apache.paimon.flink.source.AbstractNonCoordinatedSource;
 import org.apache.paimon.flink.source.AbstractNonCoordinatedSourceReader;
 import org.apache.paimon.flink.source.SimpleSourceSplit;
+import org.apache.paimon.flink.source.SplitListState;
 import org.apache.paimon.reader.RecordReader;
 import org.apache.paimon.reader.RecordReaderIterator;
 import org.apache.paimon.table.FileStoreTable;
@@ -125,6 +126,55 @@ public class CoordinatorCommitITCase {
         runningJob.cancel();
 
         assertThat(readRowCount(runningJob.table)).isGreaterThan(0L);
+    }
+
+    @Timeout(value = 180, unit = TimeUnit.SECONDS)
+    @Test
+    public void testCoordinatorCommitEndInputWaitsForCheckpointCoverage() throws Exception {
+        String tableName = "T_COORDINATOR_END_INPUT";
+        TableEnvironment tEnv =
+                TableEnvironment.create(
+                        EnvironmentSettings.newInstance().inStreamingMode().build());
+        tEnv.executeSql(
+                "CREATE CATALOG endinputcat WITH ( 'type' = 'paimon', 'warehouse' = '"
+                        + tempPath
+                        + "' )");
+        tEnv.executeSql("USE CATALOG endinputcat");
+        tEnv.executeSql(
+                "CREATE TABLE "
+                        + tableName
+                        + " (id INT, data STRING) WITH ("
+                        + "'bucket' = '-1', 'write-only' = 'true', "
+                        + "'sink.coordinator-commit.enabled' = 'true')");
+        FileStoreTable table =
+                (FileStoreTable)
+                        ((FlinkCatalog) tEnv.getCatalog("endinputcat").get())
+                                .catalog()
+                                .getTable(Identifier.create("default", tableName));
+
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(SCRIPTED_PARALLELISM);
+        env.enableCheckpointing(200L);
+        DataStreamSource<RowData> source =
+                env.fromSource(
+                                new EndInputScriptedSource(table),
+                                org.apache.flink.api.common.eventtime.WatermarkStrategy
+                                        .noWatermarks(),
+                                "coordinator-end-input-source")
+                        .setParallelism(SCRIPTED_PARALLELISM);
+        new FlinkSinkBuilder(table).forRowData(source).build();
+
+        JobClient client = env.executeAsync("coordinator-end-input");
+        try {
+            client.getJobExecutionResult().get(150, TimeUnit.SECONDS);
+            assertThat(readRowCount(table)).isGreaterThanOrEqualTo(2L);
+            assertThat(table.snapshotManager().latestSnapshot().commitIdentifier())
+                    .isEqualTo(Long.MAX_VALUE);
+        } finally {
+            if (!client.getJobStatus().get().isTerminalState()) {
+                client.cancel().get(30, TimeUnit.SECONDS);
+            }
+        }
     }
 
     /**
@@ -426,6 +476,94 @@ public class CoordinatorCommitITCase {
 
         private void cancel() throws Exception {
             client.cancel().get(30, TimeUnit.SECONDS);
+        }
+    }
+
+    /**
+     * Ends subtask 0 only after its first record is committed. Subtask 1 then produces and commits
+     * its record, leaving enough running time for a checkpoint marker from the ended writer.
+     */
+    private static class EndInputScriptedSource extends AbstractNonCoordinatedSource<RowData> {
+
+        private static final long serialVersionUID = 1L;
+
+        private final FileStoreTable table;
+
+        private EndInputScriptedSource(FileStoreTable table) {
+            this.table = table;
+        }
+
+        @Override
+        public Boundedness getBoundedness() {
+            return Boundedness.CONTINUOUS_UNBOUNDED;
+        }
+
+        @Override
+        public SourceReader<RowData, SimpleSourceSplit> createReader(
+                SourceReaderContext sourceReaderContext) {
+            return new Reader(table, sourceReaderContext.getIndexOfSubtask());
+        }
+
+        private static class Reader extends AbstractNonCoordinatedSourceReader<RowData> {
+
+            private final FileStoreTable table;
+            private final int subtask;
+            private final SplitListState<Integer> emittedState =
+                    new SplitListState<>("end-input-emitted", Object::toString, Integer::parseInt);
+            private boolean emitted;
+
+            private Reader(FileStoreTable table, int subtask) {
+                this.table = table;
+                this.subtask = subtask;
+            }
+
+            @Override
+            public InputStatus pollNext(ReaderOutput<RowData> output) throws Exception {
+                long committedRows = countRows();
+                if (!emitted && (subtask == 0 || committedRows >= 1)) {
+                    output.collect(
+                            GenericRowData.of(
+                                    subtask, StringData.fromString("subtask-" + subtask)));
+                    emitted = true;
+                    return InputStatus.MORE_AVAILABLE;
+                }
+                if ((subtask == 0 && committedRows >= 1) || (subtask == 1 && committedRows >= 2)) {
+                    // Give the checkpoint scheduler a final chance to inject its barrier after
+                    // the other subtask has ended, before this source signals its own end input.
+                    Thread.sleep(1_000L);
+                    return InputStatus.END_OF_INPUT;
+                }
+                Thread.sleep(100L);
+                return InputStatus.MORE_AVAILABLE;
+            }
+
+            @Override
+            public void addSplits(List<SimpleSourceSplit> splits) {
+                emittedState.restoreState(splits);
+                for (Integer state : emittedState.get()) {
+                    emitted = state == 1;
+                }
+            }
+
+            @Override
+            public List<SimpleSourceSplit> snapshotState(long checkpointId) {
+                emittedState.clear();
+                emittedState.add(emitted ? 1 : 0);
+                return emittedState.snapshotState();
+            }
+
+            private long countRows() throws Exception {
+                RecordReader<InternalRow> reader =
+                        table.newRead().createReader(table.newSnapshotReader().read());
+                long count = 0L;
+                try (CloseableIterator<InternalRow> iterator = new RecordReaderIterator<>(reader)) {
+                    while (iterator.hasNext()) {
+                        iterator.next();
+                        count++;
+                    }
+                }
+                return count;
+            }
         }
     }
 

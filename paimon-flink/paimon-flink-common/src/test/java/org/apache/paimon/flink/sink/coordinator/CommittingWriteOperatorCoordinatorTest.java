@@ -68,11 +68,20 @@ import java.util.Map;
 import java.util.NavigableMap;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /** Unit tests for {@link CommittingWriteOperatorCoordinator}. */
 public class CommittingWriteOperatorCoordinatorTest extends CommitterOperatorTestBase {
@@ -134,6 +143,260 @@ public class CommittingWriteOperatorCoordinatorTest extends CommitterOperatorTes
         coordinator.waitProcessAllActions();
 
         assertResults(table, "1, 1", "2, 2");
+        coordinator.close();
+    }
+
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    @Test
+    public void testEndInputCommitsOnlyAfterCoveredCheckpointCompletes() throws Exception {
+        FileStoreTable table = createUnawareBucketTable();
+        TestingContext context = new TestingContext(new OperatorID(), 2);
+        CommittingWriteOperatorCoordinator coordinator = createCoordinator(table, context);
+        coordinator.start();
+        coordinator.waitProcessAllActions();
+
+        coordinator.handleEventFromOperator(0, 0, event(committable(table, Long.MAX_VALUE, 1)));
+        coordinator.handleEventFromOperator(1, 0, event(committable(table, Long.MAX_VALUE, 2)));
+        coordinator.waitProcessAllActions();
+        assertThat(table.latestSnapshot()).isNotPresent();
+
+        // Markers are snapshots after EndInput. Their completion is the only live commit trigger.
+        coordinator.handleEventFromOperator(0, 0, emptyEvent(11L));
+        coordinator.handleEventFromOperator(1, 0, emptyEvent(11L));
+        coordinator.notifyCheckpointComplete(11L);
+        coordinator.waitProcessAllActions();
+
+        assertResults(table, "1, 1", "2, 2");
+        assertThat(table.snapshotManager().latestSnapshot().commitIdentifier())
+                .isEqualTo(Long.MAX_VALUE);
+        coordinator.close();
+    }
+
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    @Test
+    public void testCloseWaitsForPendingCommit() throws Exception {
+        FileStoreTable table = createUnawareBucketTable();
+        TestingContext context = new TestingContext(new OperatorID(), 1);
+        CountDownLatch blockingActionStarted = new CountDownLatch(1);
+        CountDownLatch allowBlockingAction = new CountDownLatch(1);
+        CountDownLatch commitStarted = new CountDownLatch(1);
+        CountDownLatch allowCommit = new CountDownLatch(1);
+        AtomicInteger commitCalls = new AtomicInteger();
+        AtomicInteger closeCalls = new AtomicInteger();
+        AtomicLong combinedCheckpoint = new AtomicLong();
+        List<String> lifecycle = new CopyOnWriteArrayList<>();
+        Committer<Committable, ManifestCommittable> committer = mock(Committer.class);
+        when(committer.combine(anyLong(), anyLong(), anyList()))
+                .thenAnswer(
+                        invocation -> {
+                            combinedCheckpoint.set(invocation.getArgument(0));
+                            return null;
+                        });
+        doAnswer(
+                        invocation -> {
+                            commitCalls.incrementAndGet();
+                            lifecycle.add("commit-started");
+                            commitStarted.countDown();
+                            allowCommit.await();
+                            lifecycle.add("commit-completed");
+                            return null;
+                        })
+                .when(committer)
+                .commit(anyList());
+        doAnswer(
+                        invocation -> {
+                            closeCalls.incrementAndGet();
+                            lifecycle.add("committer-close");
+                            return null;
+                        })
+                .when(committer)
+                .close();
+        CommittingWriteOperatorCoordinator coordinator =
+                new CommittingWriteOperatorCoordinator(
+                        context, commitContext -> committer,
+                        true,
+                        commitUser);
+        coordinator.start();
+        coordinator.waitProcessAllActions();
+
+        coordinator.runInEventLoop(
+                () -> {
+                    blockingActionStarted.countDown();
+                    allowBlockingAction.await();
+                },
+                "blocking action");
+        assertThat(blockingActionStarted.await(10, TimeUnit.SECONDS)).isTrue();
+
+        coordinator.handleEventFromOperator(0, 0, event(committable(table, Long.MAX_VALUE, 1)));
+        coordinator.handleEventFromOperator(0, 0, emptyEvent(1));
+        coordinator.notifyCheckpointComplete(1);
+
+        CountDownLatch closeEntered = new CountDownLatch(1);
+        CountDownLatch closeFinished = new CountDownLatch(1);
+        AtomicReference<Throwable> closeFailure = new AtomicReference<>();
+        Thread closeThread =
+                new Thread(
+                        () -> {
+                            closeEntered.countDown();
+                            try {
+                                coordinator.close();
+                                lifecycle.add("coordinator-close-returned");
+                            } catch (Throwable t) {
+                                closeFailure.set(t);
+                            } finally {
+                                closeFinished.countDown();
+                            }
+                        });
+        closeThread.start();
+        assertThat(closeEntered.await(10, TimeUnit.SECONDS)).isTrue();
+
+        // The final commit is queued behind this action, so close must not cancel it or close the
+        // committer yet.
+        assertThat(closeFinished.await(200, TimeUnit.MILLISECONDS)).isFalse();
+        assertThat(commitCalls).hasValue(0);
+        assertThat(closeCalls).hasValue(0);
+
+        allowBlockingAction.countDown();
+        assertThat(commitStarted.await(10, TimeUnit.SECONDS)).isTrue();
+
+        // Once commit has started, close must still wait rather than close the committer
+        // concurrently with it.
+        assertThat(closeFinished.await(200, TimeUnit.MILLISECONDS)).isFalse();
+        assertThat(closeCalls).hasValue(0);
+
+        allowCommit.countDown();
+        assertThat(closeFinished.await(10, TimeUnit.SECONDS)).isTrue();
+        closeThread.join();
+
+        assertThat(closeFailure).hasValue(null);
+        assertThat(commitCalls).hasValue(1);
+        assertThat(closeCalls).hasValue(1);
+        assertThat(combinedCheckpoint.get()).isEqualTo(Long.MAX_VALUE);
+        assertThat(lifecycle)
+                .containsExactly(
+                        "commit-started",
+                        "commit-completed",
+                        "committer-close",
+                        "coordinator-close-returned");
+        assertThat(coordinator.getCurrentState())
+                .isEqualTo(CommittingWriteOperatorCoordinator.State.CLOSED);
+    }
+
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    @Test
+    public void testCheckpointBeforeEndInputDoesNotCoverEndInput() throws Exception {
+        FileStoreTable table = createUnawareBucketTable();
+        TestingContext context = new TestingContext(new OperatorID(), 1);
+        CommittingWriteOperatorCoordinator coordinator = createCoordinator(table, context);
+        coordinator.start();
+        coordinator.waitProcessAllActions();
+
+        coordinator.handleEventFromOperator(0, 0, emptyEvent(11L));
+        coordinator.handleEventFromOperator(0, 0, event(committable(table, Long.MAX_VALUE, 1)));
+        coordinator.notifyCheckpointComplete(11L);
+        coordinator.waitProcessAllActions();
+        assertThat(table.latestSnapshot()).isNotPresent();
+
+        coordinator.handleEventFromOperator(0, 0, emptyEvent(12L));
+        coordinator.notifyCheckpointComplete(12L);
+        coordinator.waitProcessAllActions();
+        assertResults(table, "1, 1");
+        coordinator.close();
+    }
+
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    @Test
+    public void testPartialEndInputCommitsOnlyOrdinaryCheckpoint() throws Exception {
+        FileStoreTable table = createUnawareBucketTable();
+        TestingContext context = new TestingContext(new OperatorID(), 2);
+        CommittingWriteOperatorCoordinator coordinator = createCoordinator(table, context);
+        coordinator.start();
+        coordinator.waitProcessAllActions();
+
+        coordinator.handleEventFromOperator(0, 0, event(committable(table, Long.MAX_VALUE, 1)));
+        coordinator.handleEventFromOperator(0, 0, emptyEvent(1L));
+        coordinator.handleEventFromOperator(1, 0, event(committable(table, 1L, 2)));
+        coordinator.notifyCheckpointComplete(1L);
+        coordinator.waitProcessAllActions();
+        assertResults(table, "2, 2");
+
+        coordinator.handleEventFromOperator(1, 0, event(committable(table, Long.MAX_VALUE, 3)));
+        coordinator.handleEventFromOperator(0, 0, emptyEvent(2L));
+        coordinator.handleEventFromOperator(1, 0, emptyEvent(2L));
+        coordinator.notifyCheckpointComplete(2L);
+        coordinator.waitProcessAllActions();
+        assertResults(table, "1, 1", "2, 2", "3, 3");
+        coordinator.close();
+    }
+
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    @Test
+    public void testGlobalRestoreOfAllEndInputCommitsThroughRecovery() throws Exception {
+        FileStoreTable table = createUnawareBucketTable();
+        TestingContext context = new TestingContext(new OperatorID(), 2);
+        CommittingWriteOperatorCoordinator coordinator = createCoordinator(table, context);
+        coordinator.resetToCheckpoint(10L, emptyState());
+        coordinator.start();
+        coordinator.waitProcessAllActions();
+
+        coordinator.handleEventFromOperator(
+                0,
+                1,
+                restoreEventEntries(
+                        10L,
+                        new CheckpointCommittables(
+                                Long.MAX_VALUE,
+                                Collections.singletonList(committable(table, Long.MAX_VALUE, 1)),
+                                Long.MIN_VALUE)));
+        coordinator.handleEventFromOperator(
+                1,
+                1,
+                restoreEventEntries(
+                        10L,
+                        new CheckpointCommittables(
+                                Long.MAX_VALUE,
+                                Collections.singletonList(committable(table, Long.MAX_VALUE, 2)),
+                                Long.MIN_VALUE)));
+        coordinator.waitProcessAllActions();
+
+        assertResults(table, "1, 1", "2, 2");
+        coordinator.close();
+    }
+
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    @Test
+    public void testRegionRestoreKeepsPendingEndInput() throws Exception {
+        FileStoreTable table = createUnawareBucketTable();
+        TestingContext context = new TestingContext(new OperatorID(), 2);
+        CommittingWriteOperatorCoordinator coordinator = createCoordinator(table, context);
+        coordinator.start();
+        coordinator.waitProcessAllActions();
+
+        Committable firstEndInput = committable(table, Long.MAX_VALUE, 1);
+        coordinator.handleEventFromOperator(0, 0, event(firstEndInput));
+        coordinator.handleEventFromOperator(0, 0, emptyEvent(2L));
+        coordinator.handleEventFromOperator(1, 0, event(committable(table, 2L, 2)));
+        coordinator.notifyCheckpointComplete(2L);
+        coordinator.waitProcessAllActions();
+        assertResults(table, "2, 2");
+
+        coordinator.subtaskReset(0, 2L);
+        coordinator.handleEventFromOperator(
+                0,
+                1,
+                restoreEventEntries(
+                        2L,
+                        new CheckpointCommittables(
+                                Long.MAX_VALUE,
+                                Collections.singletonList(firstEndInput),
+                                Long.MIN_VALUE)));
+        coordinator.handleEventFromOperator(0, 1, emptyEvent(3L));
+        coordinator.handleEventFromOperator(1, 0, event(committable(table, Long.MAX_VALUE, 3)));
+        coordinator.handleEventFromOperator(1, 0, emptyEvent(3L));
+        coordinator.notifyCheckpointComplete(3L);
+        coordinator.waitProcessAllActions();
+
+        assertResults(table, "1, 1", "2, 2", "3, 3");
         coordinator.close();
     }
 
@@ -1193,6 +1456,13 @@ public class CommittingWriteOperatorCoordinatorTest extends CommitterOperatorTes
                 new CheckpointCommittables(restoredCheckpointId, committables, Long.MIN_VALUE);
         return RestoredCommittableEvent.create(
                 restoredCheckpointId, Collections.singletonList(entry), SERIALIZER);
+    }
+
+    private RestoredCommittableEvent restoreEventEntries(
+            long restoredCheckpointId, CheckpointCommittables... entries) throws Exception {
+        List<CheckpointCommittables> restoredEntries = new ArrayList<>();
+        Collections.addAll(restoredEntries, entries);
+        return RestoredCommittableEvent.create(restoredCheckpointId, restoredEntries, SERIALIZER);
     }
 
     private byte[] emptyState() throws Exception {
