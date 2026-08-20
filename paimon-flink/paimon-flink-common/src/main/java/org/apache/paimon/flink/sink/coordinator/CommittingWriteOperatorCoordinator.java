@@ -60,8 +60,10 @@ import static org.apache.paimon.utils.Preconditions.checkState;
  * {@link OperatorCoordinator} that runs the Paimon committer on the JobManager for the
  * unaware-bucket append write path. Writers stream per-checkpoint committables to this coordinator
  * over the {@link OperatorEvent} channel; on {@link #notifyCheckpointComplete} the coordinator
- * aligns committables across subtasks and commits them from a dedicated single-thread executor, so
- * the JM main thread is never blocked by table I/O.
+ * aligns committables across subtasks and commits them from a dedicated single-thread executor.
+ * Ordinary checkpoint completion returns without waiting for table I/O. The final checkpoint of a
+ * bounded input waits for its checkpoint-authorized terminal commit, so job completion cannot race
+ * that commit.
  *
  * <p>Wrap this class with a {@link RecreateOnResetOperatorCoordinator} (see {@link Provider}). The
  * wrapper discards this instance on global failover and creates a new one in its place, which keeps
@@ -83,6 +85,7 @@ public class CommittingWriteOperatorCoordinator implements OperatorCoordinator {
     private final TypeSerializer<CheckpointCommittables> committablesSerializer;
     private final CoordinatorStateSerializer stateSerializer;
     private final ExecutorService commitExecutor;
+    private final boolean[] endInputReceived;
     // Rebuilt per coordinator instance; state is purely in-memory, matching Flink's
     // StatusWatermarkValve which is also reconstructed per task instance without checkpointing.
     private final WatermarkAligner watermarkAligner;
@@ -117,6 +120,7 @@ public class CommittingWriteOperatorCoordinator implements OperatorCoordinator {
         this.commitExecutor =
                 Executors.newSingleThreadExecutor(
                         new CoordinatorExecutorThreadFactory("WriteCommitCoordinator", context));
+        this.endInputReceived = new boolean[parallelism];
         this.watermarkAligner = new WatermarkAligner(parallelism);
         this.state = State.CREATED;
     }
@@ -188,6 +192,10 @@ public class CommittingWriteOperatorCoordinator implements OperatorCoordinator {
 
     @Override
     public void handleEventFromOperator(int subtask, int attemptNumber, OperatorEvent event) {
+        if (event instanceof CommittableEvent
+                && ((CommittableEvent) event).getCheckpointId() == END_INPUT_CHECKPOINT_ID) {
+            endInputReceived[subtask] = true;
+        }
         runInEventLoop(
                 () -> {
                     if (event instanceof CommittableEvent) {
@@ -251,6 +259,14 @@ public class CommittingWriteOperatorCoordinator implements OperatorCoordinator {
                 },
                 "completing checkpoint %d",
                 checkpointId);
+        if (allEndInputReceived()) {
+            try {
+                waitProcessAllActions();
+            } catch (Exception e) {
+                throw new RuntimeException(
+                        "Unable to finish terminal checkpoint " + checkpointId + " commit", e);
+            }
+        }
     }
 
     /**
@@ -284,6 +300,7 @@ public class CommittingWriteOperatorCoordinator implements OperatorCoordinator {
 
     @Override
     public void subtaskReset(int subtask, long checkpointId) {
+        endInputReceived[subtask] = false;
         runInEventLoop(
                 () -> {
                     WriterCommittables writerCommittables = subtaskCommittables[subtask];
@@ -373,6 +390,15 @@ public class CommittingWriteOperatorCoordinator implements OperatorCoordinator {
     private boolean allEndInputCoveredBy(long checkpointId) {
         for (WriterCommittables committables : subtaskCommittables) {
             if (committables == null || !committables.isEndInputCoveredBy(checkpointId)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean allEndInputReceived() {
+        for (boolean received : endInputReceived) {
+            if (!received) {
                 return false;
             }
         }
