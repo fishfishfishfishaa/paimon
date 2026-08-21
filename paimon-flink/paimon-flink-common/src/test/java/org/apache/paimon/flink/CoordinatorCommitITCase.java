@@ -166,6 +166,7 @@ public class CoordinatorCommitITCase {
         JobClient client = env.executeAsync("coordinator-end-input");
         try {
             client.getJobExecutionResult().get(150, TimeUnit.SECONDS);
+            waitUntilRowsCommitted(new RunningJob(table, client));
             assertThat(readRowCount(table)).isEqualTo(2L);
             assertThat(table.snapshotManager().latestSnapshot().commitIdentifier())
                     .isEqualTo(Long.MAX_VALUE);
