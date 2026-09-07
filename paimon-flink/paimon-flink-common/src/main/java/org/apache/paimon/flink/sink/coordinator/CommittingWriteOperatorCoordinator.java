@@ -81,6 +81,7 @@ public class CommittingWriteOperatorCoordinator implements OperatorCoordinator {
     private final boolean streamingCheckpointEnabled;
     private final int parallelism;
     @Nullable private final SavepointTagger.Factory savepointTaggerFactory;
+    @Nullable private final Long endInputWatermark;
 
     private final WriterCommittables[] subtaskCommittables;
     private final TypeSerializer<CheckpointCommittables> committablesSerializer;
@@ -108,11 +109,28 @@ public class CommittingWriteOperatorCoordinator implements OperatorCoordinator {
             boolean streamingCheckpointEnabled,
             String initialCommitUser,
             @Nullable SavepointTagger.Factory savepointTaggerFactory) {
+        this(
+                context,
+                committerFactory,
+                streamingCheckpointEnabled,
+                initialCommitUser,
+                savepointTaggerFactory,
+                null);
+    }
+
+    public CommittingWriteOperatorCoordinator(
+            OperatorCoordinator.Context context,
+            Committer.Factory<Committable, ManifestCommittable> committerFactory,
+            boolean streamingCheckpointEnabled,
+            String initialCommitUser,
+            @Nullable SavepointTagger.Factory savepointTaggerFactory,
+            @Nullable Long endInputWatermark) {
         this.context = context;
         this.committerFactory = committerFactory;
         this.streamingCheckpointEnabled = streamingCheckpointEnabled;
         this.commitUser = initialCommitUser;
         this.savepointTaggerFactory = savepointTaggerFactory;
+        this.endInputWatermark = endInputWatermark;
         this.parallelism = context.currentParallelism();
         this.subtaskCommittables = new WriterCommittables[parallelism];
         this.committablesSerializer =
@@ -230,14 +248,10 @@ public class CommittingWriteOperatorCoordinator implements OperatorCoordinator {
                             alignWatermarkPerCheckpoint(
                                     checkpointId, subtaskCommittables, watermarkAligner);
                     if (includeEndInput) {
-                        watermarkPerCheckpoint.put(
-                                END_INPUT_CHECKPOINT_ID,
-                                watermarkAligner.align(
-                                        subtaskWatermarksAt(
-                                                END_INPUT_CHECKPOINT_ID, subtaskCommittables)));
+                        watermarkPerCheckpoint.put(END_INPUT_CHECKPOINT_ID, endInputWatermark());
                     }
                     commitUpToCheckpoint(
-                            checkpointId,
+                            includeEndInput ? END_INPUT_CHECKPOINT_ID : checkpointId,
                             pollManifestCommittablesForCheckpoint(
                                     checkpointId,
                                     subtaskCommittables,
@@ -425,13 +439,10 @@ public class CommittingWriteOperatorCoordinator implements OperatorCoordinator {
         Map<Long, Long> watermarkPerCheckpoint =
                 alignWatermarkPerCheckpoint(checkpointId, subtaskCommittables, watermarkAligner);
         if (includeEndInput) {
-            watermarkPerCheckpoint.put(
-                    END_INPUT_CHECKPOINT_ID,
-                    watermarkAligner.align(
-                            subtaskWatermarksAt(END_INPUT_CHECKPOINT_ID, subtaskCommittables)));
+            watermarkPerCheckpoint.put(END_INPUT_CHECKPOINT_ID, endInputWatermark());
         }
         commitUpToCheckpoint(
-                checkpointId,
+                includeEndInput ? END_INPUT_CHECKPOINT_ID : checkpointId,
                 pollManifestCommittablesForCheckpoint(
                         checkpointId,
                         subtaskCommittables,
@@ -445,6 +456,15 @@ public class CommittingWriteOperatorCoordinator implements OperatorCoordinator {
         if (savepointTagger != null) {
             savepointTagger.tagUpTo(checkpointId);
         }
+    }
+
+    private long endInputWatermark() {
+        // Match CommitterOperator.endInput: the configured terminal watermark overrides the
+        // input watermark, even when it is lower than a watermark previously seen by writers.
+        return endInputWatermark != null
+                ? endInputWatermark
+                : watermarkAligner.align(
+                        subtaskWatermarksAt(END_INPUT_CHECKPOINT_ID, subtaskCommittables));
     }
 
     @VisibleForTesting
@@ -729,18 +749,21 @@ public class CommittingWriteOperatorCoordinator implements OperatorCoordinator {
         private final boolean streamingCheckpointEnabled;
         private final String initialCommitUser;
         @Nullable private final SavepointTagger.Factory savepointTaggerFactory;
+        @Nullable private final Long endInputWatermark;
 
         public Provider(
                 OperatorID operatorId,
                 Committer.Factory<Committable, ManifestCommittable> committerFactory,
                 boolean streamingCheckpointEnabled,
                 String initialCommitUser,
-                @Nullable SavepointTagger.Factory savepointTaggerFactory) {
+                @Nullable SavepointTagger.Factory savepointTaggerFactory,
+                @Nullable Long endInputWatermark) {
             super(operatorId);
             this.committerFactory = committerFactory;
             this.streamingCheckpointEnabled = streamingCheckpointEnabled;
             this.initialCommitUser = initialCommitUser;
             this.savepointTaggerFactory = savepointTaggerFactory;
+            this.endInputWatermark = endInputWatermark;
         }
 
         @Override
@@ -750,7 +773,8 @@ public class CommittingWriteOperatorCoordinator implements OperatorCoordinator {
                     committerFactory,
                     streamingCheckpointEnabled,
                     initialCommitUser,
-                    savepointTaggerFactory);
+                    savepointTaggerFactory,
+                    endInputWatermark);
         }
     }
 }

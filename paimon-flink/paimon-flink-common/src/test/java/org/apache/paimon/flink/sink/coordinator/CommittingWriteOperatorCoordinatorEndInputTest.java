@@ -47,6 +47,9 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.annotation.Nullable;
 
@@ -107,6 +110,162 @@ public class CommittingWriteOperatorCoordinatorEndInputTest extends CommitterTes
         assertResults(table, "1, 1");
         assertThat(table.snapshotManager().latestSnapshot().commitIdentifier())
                 .isEqualTo(Long.MAX_VALUE);
+        coordinator.close();
+    }
+
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(longs = 11111L)
+    public void testEndInputWatermark(@Nullable Long endInputWatermark) throws Exception {
+        FileStoreTable table = createUnawareBucketTable();
+        CommittingWriteOperatorCoordinator coordinator =
+                createCoordinator(table, 2, endInputWatermark);
+        coordinator.start();
+        coordinator.waitProcessAllActions();
+
+        coordinator.handleEventFromOperator(
+                0, 0, eventOf(1L, Collections.singletonList(committable(table, 1L, 1)), 100L));
+        coordinator.handleEventFromOperator(1, 0, eventOf(1L, Collections.emptyList(), 200L));
+        coordinator.notifyCheckpointComplete(1L);
+        coordinator.waitProcessAllActions();
+        assertThat(table.snapshotManager().latestSnapshot().watermark()).isEqualTo(100L);
+
+        coordinator.handleEventFromOperator(
+                0,
+                0,
+                eventOf(
+                        Long.MAX_VALUE,
+                        Collections.singletonList(committable(table, Long.MAX_VALUE, 2)),
+                        20000L));
+        coordinator.handleEventFromOperator(
+                1, 0, eventOf(Long.MAX_VALUE, Collections.emptyList(), 30000L));
+        coordinator.handleEventFromOperator(0, 0, emptyEvent(2L));
+        coordinator.handleEventFromOperator(1, 0, emptyEvent(2L));
+        coordinator.notifyCheckpointComplete(2L);
+        coordinator.waitProcessAllActions();
+
+        assertResults(table, "1, 1", "2, 2");
+        assertThat(table.snapshotManager().latestSnapshot().commitIdentifier())
+                .isEqualTo(Long.MAX_VALUE);
+        assertThat(table.snapshotManager().latestSnapshot().watermark())
+                .isEqualTo(endInputWatermark == null ? 20000L : endInputWatermark);
+        coordinator.close();
+    }
+
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(longs = 11111L)
+    public void testEndInputWatermarkOnRecovery(@Nullable Long endInputWatermark) throws Exception {
+        FileStoreTable table = createUnawareBucketTable();
+        CommittingWriteOperatorCoordinator coordinator =
+                createCoordinator(table, 2, endInputWatermark);
+        coordinator.resetToCheckpoint(10L, emptyState());
+        coordinator.start();
+        coordinator.waitProcessAllActions();
+
+        coordinator.handleEventFromOperator(
+                0,
+                1,
+                restoreEventEntries(
+                        10L,
+                        new CheckpointCommittables(
+                                Long.MAX_VALUE,
+                                Collections.singletonList(committable(table, Long.MAX_VALUE, 1)),
+                                20000L)));
+        coordinator.handleEventFromOperator(
+                1,
+                1,
+                restoreEventEntries(
+                        10L,
+                        new CheckpointCommittables(
+                                Long.MAX_VALUE, Collections.emptyList(), 30000L)));
+        coordinator.waitProcessAllActions();
+
+        assertResults(table, "1, 1");
+        assertThat(table.snapshotManager().latestSnapshot().commitIdentifier())
+                .isEqualTo(Long.MAX_VALUE);
+        assertThat(table.snapshotManager().latestSnapshot().watermark())
+                .isEqualTo(endInputWatermark == null ? 20000L : endInputWatermark);
+        coordinator.close();
+    }
+
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(longs = 11111L)
+    public void testEmptyEndInputWatermarkForForcedSnapshot(@Nullable Long endInputWatermark)
+            throws Exception {
+        FileStoreTable table =
+                createUnawareBucketTable()
+                        .copy(
+                                Collections.singletonMap(
+                                        CoreOptions.COMMIT_FORCE_CREATE_SNAPSHOT.key(), "true"));
+        CommittingWriteOperatorCoordinator coordinator =
+                createCoordinator(table, 2, endInputWatermark);
+        coordinator.start();
+        coordinator.waitProcessAllActions();
+
+        coordinator.handleEventFromOperator(0, 0, eventOf(1L, Collections.emptyList(), 100L));
+        coordinator.handleEventFromOperator(1, 0, eventOf(1L, Collections.emptyList(), 200L));
+        coordinator.notifyCheckpointComplete(1L);
+        coordinator.waitProcessAllActions();
+        assertThat(table.snapshotManager().latestSnapshot().watermark()).isEqualTo(100L);
+
+        coordinator.handleEventFromOperator(
+                0, 0, eventOf(Long.MAX_VALUE, Collections.emptyList(), 20000L));
+        coordinator.handleEventFromOperator(
+                1, 0, eventOf(Long.MAX_VALUE, Collections.emptyList(), 30000L));
+        coordinator.handleEventFromOperator(0, 0, emptyEvent(2L));
+        coordinator.handleEventFromOperator(1, 0, emptyEvent(2L));
+        coordinator.notifyCheckpointComplete(2L);
+        coordinator.waitProcessAllActions();
+
+        assertThat(table.snapshotManager().latestSnapshot().commitIdentifier())
+                .isEqualTo(Long.MAX_VALUE);
+        assertThat(table.snapshotManager().latestSnapshot().watermark())
+                .isEqualTo(endInputWatermark == null ? 20000L : endInputWatermark);
+        coordinator.close();
+    }
+
+    @Timeout(value = 30, unit = TimeUnit.SECONDS)
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(longs = 11111L)
+    public void testEmptyEndInputWatermarkOnRecovery(@Nullable Long endInputWatermark)
+            throws Exception {
+        FileStoreTable table =
+                createUnawareBucketTable()
+                        .copy(
+                                Collections.singletonMap(
+                                        CoreOptions.COMMIT_FORCE_CREATE_SNAPSHOT.key(), "true"));
+        CommittingWriteOperatorCoordinator coordinator =
+                createCoordinator(table, 2, endInputWatermark);
+        coordinator.resetToCheckpoint(10L, emptyState());
+        coordinator.start();
+        coordinator.waitProcessAllActions();
+
+        coordinator.handleEventFromOperator(
+                0,
+                1,
+                restoreEventEntries(
+                        10L,
+                        new CheckpointCommittables(
+                                Long.MAX_VALUE, Collections.emptyList(), 20000L)));
+        coordinator.handleEventFromOperator(
+                1,
+                1,
+                restoreEventEntries(
+                        10L,
+                        new CheckpointCommittables(
+                                Long.MAX_VALUE, Collections.emptyList(), 30000L)));
+        coordinator.waitProcessAllActions();
+
+        assertThat(table.snapshotManager().latestSnapshot().commitIdentifier())
+                .isEqualTo(Long.MAX_VALUE);
+        assertThat(table.snapshotManager().latestSnapshot().watermark())
+                .isEqualTo(endInputWatermark == null ? 20000L : endInputWatermark);
         coordinator.close();
     }
 
@@ -471,6 +630,11 @@ public class CommittingWriteOperatorCoordinatorEndInputTest extends CommitterTes
 
     private CommittingWriteOperatorCoordinator createCoordinator(
             FileStoreTable table, int parallelism) {
+        return createCoordinator(table, parallelism, (Long) null);
+    }
+
+    private CommittingWriteOperatorCoordinator createCoordinator(
+            FileStoreTable table, int parallelism, @Nullable Long endInputWatermark) {
         return createCoordinator(
                 table,
                 parallelism,
@@ -480,19 +644,29 @@ public class CommittingWriteOperatorCoordinatorEndInputTest extends CommitterTes
                                 table.newStreamWriteBuilder()
                                         .withCommitUser(commitContext.commitUser())
                                         .newCommit(),
-                                commitContext));
+                                commitContext),
+                endInputWatermark);
     }
 
     private CommittingWriteOperatorCoordinator createCoordinator(
             FileStoreTable table,
             int parallelism,
             Committer.Factory<Committable, ManifestCommittable> committerFactory) {
+        return createCoordinator(table, parallelism, committerFactory, null);
+    }
+
+    private CommittingWriteOperatorCoordinator createCoordinator(
+            FileStoreTable table,
+            int parallelism,
+            Committer.Factory<Committable, ManifestCommittable> committerFactory,
+            @Nullable Long endInputWatermark) {
         return new CommittingWriteOperatorCoordinator(
                 new TestingContext(new OperatorID(), parallelism),
                 committerFactory,
                 true,
                 commitUser,
-                null);
+                null,
+                endInputWatermark);
     }
 
     private Committable committable(FileStoreTable table, long checkpointId, int value)

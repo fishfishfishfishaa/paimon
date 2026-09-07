@@ -144,6 +144,7 @@ public class CoordinatorCommitITCase {
                         + tableName
                         + " (id INT, data STRING) WITH ("
                         + "'bucket' = '-1', 'write-only' = 'true', "
+                        + "'end-input.watermark' = '11111', "
                         + "'sink.coordinator-commit.enabled' = 'true')");
         FileStoreTable table =
                 (FileStoreTable)
@@ -170,6 +171,7 @@ public class CoordinatorCommitITCase {
             assertThat(readRowCount(table)).isEqualTo(2L);
             assertThat(table.snapshotManager().latestSnapshot().commitIdentifier())
                     .isEqualTo(Long.MAX_VALUE);
+            assertThat(table.snapshotManager().latestSnapshot().watermark()).isEqualTo(11111L);
         } finally {
             if (!client.getJobStatus().get().isTerminalState()) {
                 client.cancel().get(30, TimeUnit.SECONDS);

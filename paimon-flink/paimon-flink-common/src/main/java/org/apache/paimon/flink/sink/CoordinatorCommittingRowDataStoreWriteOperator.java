@@ -211,6 +211,11 @@ public class CoordinatorCommittingRowDataStoreWriteOperator
 
     @Override
     public void endInput() throws Exception {
+        if (endOfInput) {
+            // initializeState already replayed the checkpointed terminal entry. Its input will
+            // not be replayed, so preparing another (possibly empty) entry would lose pending data.
+            return;
+        }
         endOfInput = true;
         emitCommittables(true, END_INPUT_CHECKPOINT_ID);
         // endInput is not followed by snapshotState, so report the terminal entry directly.

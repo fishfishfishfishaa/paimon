@@ -55,6 +55,8 @@ import org.apache.flink.streaming.util.OneInputStreamOperatorTestHarness;
 import org.apache.flink.util.FlinkRuntimeException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.annotation.Nullable;
 
@@ -203,6 +205,130 @@ public class CoordinatorCommittingRowDataStoreWriteOperatorTest extends Committe
         assertThat(operator.getPendingCommittables()).isEmpty();
 
         harness.close();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    @Timeout(30)
+    public void testRepeatedEndInputAfterRecoveryKeepsPendingData(boolean globalRecovery)
+            throws Exception {
+        FileStoreTable table = createUnawareBucketTable();
+        String commitUser = UUID.randomUUID().toString();
+        TypeSerializer<Committable> serializer =
+                new CommittableTypeInfo().createSerializer(new ExecutionConfig());
+        List<OperatorEvent> events = new ArrayList<>();
+        OperatorSubtaskState snapshot;
+        try (OneInputStreamOperatorTestHarness<InternalRow, Committable> harness =
+                createHarness(table, commitUser, events::add)) {
+            harness.setup(serializer);
+            harness.open();
+            harness.processElement(GenericRow.of(1, 10L), 1);
+            harness.endInput();
+            harness.prepareSnapshotPreBarrier(1);
+            snapshot = harness.snapshot(1, 10);
+            harness.notifyOfCompletedCheckpoint(1);
+        }
+
+        CommittingWriteOperatorCoordinator coordinator =
+                createTwoWriterCoordinator(table, commitUser);
+        coordinator.start();
+        coordinator.waitProcessAllActions();
+        try {
+            for (OperatorEvent event : events) {
+                coordinator.handleEventFromOperator(0, 0, event);
+            }
+            CheckpointCommittables runningWriterCheckpoint =
+                    new CheckpointCommittables(1L, Collections.emptyList(), Long.MIN_VALUE);
+            coordinator.handleEventFromOperator(
+                    1,
+                    0,
+                    CommittableEvent.create(1L, runningWriterCheckpoint, COMMITTABLES_SERIALIZER));
+            coordinator.notifyCheckpointComplete(1);
+            coordinator.waitProcessAllActions();
+            // W0's terminal data is checkpointed, but W1 has not finished yet.
+            assertThat(table.snapshotManager().latestSnapshot()).isNull();
+
+            if (globalRecovery) {
+                coordinator.close();
+                coordinator = createTwoWriterCoordinator(table, commitUser);
+                coordinator.resetToCheckpoint(1L, null);
+                coordinator.start();
+            } else {
+                coordinator.subtaskReset(0, 1L);
+            }
+            coordinator.waitProcessAllActions();
+
+            events.clear();
+            try (OneInputStreamOperatorTestHarness<InternalRow, Committable> restored =
+                    createHarness(table, commitUser, events::add)) {
+                restored.setup(serializer);
+                restoreWithCheckpointId(restored, snapshot, 1L);
+                restored.open();
+                coordinator.handleEventFromOperator(0, 1, events.get(0));
+                if (globalRecovery) {
+                    coordinator.handleEventFromOperator(
+                            1,
+                            1,
+                            RestoredCommittableEvent.create(
+                                    1L,
+                                    Collections.singletonList(runningWriterCheckpoint),
+                                    COMMITTABLES_SERIALIZER));
+                }
+                coordinator.waitProcessAllActions();
+                assertThat(table.snapshotManager().latestSnapshot()).isNull();
+
+                events.clear();
+                // W0's source has no records to replay from C1, but signals end-of-input again.
+                restored.endInput();
+                restored.prepareSnapshotPreBarrier(2L);
+                restored.snapshot(2L, 20L);
+                for (OperatorEvent event : events) {
+                    coordinator.handleEventFromOperator(0, 1, event);
+                }
+                coordinator.handleEventFromOperator(
+                        1,
+                        1,
+                        CommittableEvent.create(
+                                Long.MAX_VALUE,
+                                new CheckpointCommittables(
+                                        Long.MAX_VALUE, Collections.emptyList(), Long.MIN_VALUE),
+                                COMMITTABLES_SERIALIZER));
+                coordinator.handleEventFromOperator(
+                        1,
+                        1,
+                        CommittableEvent.create(
+                                2L,
+                                new CheckpointCommittables(
+                                        2L, Collections.emptyList(), Long.MIN_VALUE),
+                                COMMITTABLES_SERIALIZER));
+                coordinator.notifyCheckpointComplete(2L);
+                coordinator.waitProcessAllActions();
+                assertResults(table, "1, 10");
+
+                CoordinatorCommittingRowDataStoreWriteOperator operator =
+                        (CoordinatorCommittingRowDataStoreWriteOperator) restored.getOperator();
+                assertThat(operator.getPendingCommittables().get(Long.MAX_VALUE).committables())
+                        .hasSize(1);
+            }
+        } finally {
+            coordinator.close();
+        }
+    }
+
+    private CommittingWriteOperatorCoordinator createTwoWriterCoordinator(
+            FileStoreTable table, String commitUser) {
+        return new CommittingWriteOperatorCoordinator(
+                new TestingContext() {
+                    @Override
+                    public int currentParallelism() {
+                        return 2;
+                    }
+                },
+                context ->
+                        new StoreCommitter(table, table.newCommit(context.commitUser()), context),
+                true,
+                commitUser,
+                null);
     }
 
     @Test

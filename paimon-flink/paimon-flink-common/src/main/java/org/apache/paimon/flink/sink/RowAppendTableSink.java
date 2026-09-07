@@ -133,7 +133,8 @@ public class RowAppendTableSink extends AppendTableSink<InternalRow> {
                     committerFactory,
                     streamingCheckpointEnabled,
                     initialCommitUser,
-                    autoTagForSavepoint ? createSavepointTaggerFactory(table) : null);
+                    autoTagForSavepoint ? createSavepointTaggerFactory(table) : null,
+                    new Options(table.options()).get(FlinkConnectorOptions.END_INPUT_WATERMARK));
         }
 
         /**
