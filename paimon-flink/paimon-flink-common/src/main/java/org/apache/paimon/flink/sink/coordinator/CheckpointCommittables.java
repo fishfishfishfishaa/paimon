@@ -35,13 +35,24 @@ public class CheckpointCommittables {
     // Idle bit is frozen at barrier time together with watermark; mirrors what Flink's
     // StatusWatermarkValve would have observed on the writer's input at the moment of the barrier.
     private final boolean idle;
+    private final boolean terminal;
 
     public CheckpointCommittables(
             long checkpointId, List<Committable> committables, long watermark, boolean idle) {
+        this(checkpointId, committables, watermark, idle, false);
+    }
+
+    public CheckpointCommittables(
+            long checkpointId,
+            List<Committable> committables,
+            long watermark,
+            boolean idle,
+            boolean terminal) {
         this.checkpointId = checkpointId;
         this.committables = committables;
         this.watermark = watermark;
         this.idle = idle;
+        this.terminal = terminal;
     }
 
     // Convenience for callers that only need the pre-idle-aware shape (ACTIVE writer).
@@ -66,6 +77,11 @@ public class CheckpointCommittables {
         return idle;
     }
 
+    /** True only after this checkpoint captured a fully sealed writer tail. */
+    public boolean terminal() {
+        return terminal;
+    }
+
     public int size() {
         return committables.size();
     }
@@ -77,7 +93,7 @@ public class CheckpointCommittables {
     @Override
     public String toString() {
         return String.format(
-                "CheckpointCommittables{checkpointId=%d, watermark=%d, idle=%s, committables=%s}",
-                checkpointId, watermark, idle, committables);
+                "CheckpointCommittables{checkpointId=%d, watermark=%d, idle=%s, terminal=%s, committables=%s}",
+                checkpointId, watermark, idle, terminal, committables);
     }
 }

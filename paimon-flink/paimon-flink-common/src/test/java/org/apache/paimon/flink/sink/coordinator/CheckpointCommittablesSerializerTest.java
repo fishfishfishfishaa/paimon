@@ -38,8 +38,8 @@ public class CheckpointCommittablesSerializerTest {
                     new CommittableSerializer(new CommitMessageSerializer()));
 
     @Test
-    public void testCurrentVersionIsV2() {
-        assertThat(serializer.getVersion()).isEqualTo(2);
+    public void testCurrentVersionIsV3() {
+        assertThat(serializer.getVersion()).isEqualTo(3);
     }
 
     @Test
@@ -73,7 +73,37 @@ public class CheckpointCommittablesSerializerTest {
         // v1 predates idle tracking; readers must default to ACTIVE so pre-upgrade payloads keep
         // participating in the min just like they did before.
         assertThat(decoded.idle()).isFalse();
+        assertThat(decoded.terminal()).isFalse();
         assertThat(decoded.committables()).isEmpty();
+    }
+
+    @Test
+    public void testV2DefaultsToNonTerminal() throws IOException {
+        DataOutputSerializer out = new DataOutputSerializer(32);
+        out.writeLong(7L);
+        out.writeLong(1234L);
+        out.writeBoolean(true);
+        out.writeInt(new CommittableSerializer(new CommitMessageSerializer()).getVersion());
+        out.writeInt(0);
+        CheckpointCommittables decoded = serializer.deserialize(2, out.getCopyOfBuffer());
+        assertThat(decoded.checkpointId()).isEqualTo(7L);
+        assertThat(decoded.watermark()).isEqualTo(1234L);
+        assertThat(decoded.idle()).isTrue();
+        assertThat(decoded.terminal()).isFalse();
+    }
+
+    @Test
+    public void testTerminalRoundTrip() throws IOException {
+        for (boolean terminal : new boolean[] {false, true}) {
+            CheckpointCommittables original =
+                    new CheckpointCommittables(7L, Collections.emptyList(), 1234L, true, terminal);
+            CheckpointCommittables decoded =
+                    serializer.deserialize(3, serializer.serialize(original));
+            assertThat(decoded.terminal()).isEqualTo(terminal);
+            assertThat(decoded.checkpointId()).isEqualTo(7L);
+            assertThat(decoded.watermark()).isEqualTo(1234L);
+            assertThat(decoded.idle()).isTrue();
+        }
     }
 
     @Test
