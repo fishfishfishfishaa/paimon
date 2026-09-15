@@ -19,9 +19,13 @@
 package org.apache.paimon.flink.sink.listener;
 
 import org.apache.paimon.CoreOptions;
+import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.CatalogContext;
+import org.apache.paimon.catalog.CatalogFactory;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.BinaryString;
 import org.apache.paimon.data.GenericRow;
+import org.apache.paimon.disk.IOManagerImpl;
 import org.apache.paimon.flink.FlinkConnectorOptions;
 import org.apache.paimon.flink.sink.StoreCommitter;
 import org.apache.paimon.fs.Path;
@@ -34,7 +38,9 @@ import org.apache.paimon.table.TableTestBase;
 import org.apache.paimon.table.sink.TableCommitImpl;
 import org.apache.paimon.table.sink.TableWriteImpl;
 import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.utils.TraceableFileIO;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.LocalDateTime;
@@ -52,6 +58,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /** Test for {@link FlinkConnectorOptions.PartitionMarkDoneActionMode}. */
 public class WatermarkPartitionMarkDoneTest extends TableTestBase {
+    @Override
+    @BeforeEach
+    public void beforeEach() throws Catalog.DatabaseAlreadyExistException {
+        database = "default";
+        warehouse = new Path(TraceableFileIO.SCHEME + "://" + tempPath.toUri().getPath());
+        catalog = CatalogFactory.createCatalog(CatalogContext.create(warehouse));
+        catalog.createDatabase(database, true);
+        ioManager = new IOManagerImpl(tempPath.toString());
+    }
+
     @Test
     public void testWaterMarkPartitionMarkDone() throws Exception {
         Identifier identifier = identifier("T");

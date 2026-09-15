@@ -59,6 +59,15 @@ public class CommitListeners implements Closeable {
         }
     }
 
+    /** Rebuild partition bookkeeping without invoking externally visible actions. */
+    public void restorePartitionTracking(List<ManifestCommittable> committables) {
+        for (CommitListener listener : listeners) {
+            if (listener instanceof PartitionMarkDoneListener) {
+                ((PartitionMarkDoneListener) listener).restoreTracking(committables);
+            }
+        }
+    }
+
     public void snapshotState() throws Exception {
         for (CommitListener listener : listeners) {
             listener.snapshotState();

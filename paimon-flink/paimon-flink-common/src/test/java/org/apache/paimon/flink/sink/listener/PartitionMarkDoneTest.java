@@ -18,7 +18,11 @@
 
 package org.apache.paimon.flink.sink.listener;
 
+import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.CatalogContext;
+import org.apache.paimon.catalog.CatalogFactory;
 import org.apache.paimon.catalog.Identifier;
+import org.apache.paimon.disk.IOManagerImpl;
 import org.apache.paimon.flink.sink.state.OperatorBackendStateStore;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.options.Options;
@@ -26,8 +30,10 @@ import org.apache.paimon.schema.Schema;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.TableTestBase;
 import org.apache.paimon.types.DataTypes;
+import org.apache.paimon.utils.TraceableFileIO;
 
 import org.apache.flink.streaming.api.operators.collect.utils.MockOperatorStateStore;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.function.Consumer;
@@ -40,6 +46,16 @@ import static org.apache.paimon.flink.sink.listener.ListenerTestUtils.notifyComm
 import static org.assertj.core.api.Assertions.assertThat;
 
 class PartitionMarkDoneTest extends TableTestBase {
+
+    @Override
+    @BeforeEach
+    public void beforeEach() throws Catalog.DatabaseAlreadyExistException {
+        database = "default";
+        warehouse = new Path(TraceableFileIO.SCHEME + "://" + tempPath.toUri().getPath());
+        catalog = CatalogFactory.createCatalog(CatalogContext.create(warehouse));
+        catalog.createDatabase(database, true);
+        ioManager = new IOManagerImpl(tempPath.toString());
+    }
 
     @Test
     public void testTriggerByCompaction() throws Exception {

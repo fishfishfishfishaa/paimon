@@ -110,7 +110,11 @@ public class RowAppendTableSink extends AppendTableSink<InternalRow> {
         public OperatorCoordinator.Provider getCoordinatorProvider(
                 String operatorName, OperatorID operatorID) {
             return new CommittingWriteOperatorCoordinator.Provider(
-                    operatorID, committerFactory, streamingCheckpointEnabled, initialCommitUser);
+                    operatorID,
+                    committerFactory,
+                    streamingCheckpointEnabled,
+                    initialCommitUser,
+                    new Options(table.options()).get(FlinkConnectorOptions.END_INPUT_WATERMARK));
         }
 
         @Override
@@ -120,9 +124,11 @@ public class RowAppendTableSink extends AppendTableSink<InternalRow> {
             OperatorID operatorId = parameters.getStreamConfig().getOperatorID();
             OperatorEventGateway gateway =
                     parameters.getOperatorEventDispatcher().getOperatorEventGateway(operatorId);
-            return (T)
+            CoordinatorCommittingRowDataStoreWriteOperator operator =
                     new CoordinatorCommittingRowDataStoreWriteOperator(
                             parameters, table, storeSinkWriteProvider, initialCommitUser, gateway);
+            parameters.getOperatorEventDispatcher().registerEventHandler(operatorId, operator);
+            return (T) operator;
         }
 
         @Override

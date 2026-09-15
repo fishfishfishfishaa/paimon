@@ -103,6 +103,10 @@ public class PartitionMarkDoneTrigger {
         state.restore().forEach(p -> pendingPartitions.put(p, currentTimeMillis));
     }
 
+    boolean hasPendingPartitions() {
+        return !pendingPartitions.isEmpty();
+    }
+
     public void notifyPartition(String partition) {
         notifyPartition(partition, System.currentTimeMillis());
     }

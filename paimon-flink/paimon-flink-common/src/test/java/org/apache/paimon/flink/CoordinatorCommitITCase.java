@@ -21,22 +21,27 @@ package org.apache.paimon.flink;
 import org.apache.paimon.Snapshot;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.InternalRow;
+import org.apache.paimon.flink.sink.Committer;
 import org.apache.paimon.flink.sink.FlinkSinkBuilder;
+import org.apache.paimon.flink.sink.listener.CommitListener;
+import org.apache.paimon.flink.sink.listener.CommitListenerFactory;
 import org.apache.paimon.flink.source.AbstractNonCoordinatedSource;
 import org.apache.paimon.flink.source.AbstractNonCoordinatedSourceReader;
 import org.apache.paimon.flink.source.SimpleSourceSplit;
+import org.apache.paimon.manifest.ManifestCommittable;
 import org.apache.paimon.reader.RecordReader;
 import org.apache.paimon.reader.RecordReaderIterator;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.utils.CloseableIterator;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.eventtime.Watermark;
 import org.apache.flink.api.connector.source.Boundedness;
 import org.apache.flink.api.connector.source.ReaderOutput;
 import org.apache.flink.api.connector.source.SourceReader;
 import org.apache.flink.api.connector.source.SourceReaderContext;
-import org.apache.flink.client.program.ClusterClient;
+import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.core.execution.JobClient;
 import org.apache.flink.core.io.InputStatus;
@@ -44,6 +49,8 @@ import org.apache.flink.metrics.Metric;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.groups.OperatorMetricGroup;
 import org.apache.flink.runtime.client.JobStatusMessage;
+import org.apache.flink.runtime.execution.ExecutionState;
+import org.apache.flink.runtime.rest.messages.job.JobDetailsInfo;
 import org.apache.flink.runtime.testutils.InMemoryReporter;
 import org.apache.flink.runtime.testutils.MiniClusterResourceConfiguration;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
@@ -62,6 +69,9 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -89,7 +99,7 @@ public class CoordinatorCommitITCase {
 
     @AfterEach
     public final void cleanupRunningJobs() throws Exception {
-        ClusterClient<?> clusterClient = MINI_CLUSTER_EXTENSION.createRestClusterClient();
+        RestClusterClient<?> clusterClient = MINI_CLUSTER_EXTENSION.createRestClusterClient();
         for (JobStatusMessage job : clusterClient.listJobs().get()) {
             if (!job.getJobState().isTerminalState()) {
                 try {
@@ -129,7 +139,7 @@ public class CoordinatorCommitITCase {
 
     @Timeout(value = 180, unit = TimeUnit.SECONDS)
     @Test
-    public void testCoordinatorCommitEndInput() throws Exception {
+    public void testCoordinatorCommitEndInputFinalizesAndFinishes() throws Exception {
         String tableName = "T_COORDINATOR_END_INPUT";
         TableEnvironment tEnv =
                 TableEnvironment.create(
@@ -165,12 +175,74 @@ public class CoordinatorCommitITCase {
 
         JobClient client = env.executeAsync("coordinator-end-input");
         try {
-            client.getJobExecutionResult().get(150, TimeUnit.SECONDS);
             waitUntilRowsCommitted(new RunningJob(table, client));
             assertThat(readRowCount(table)).isEqualTo(2L);
+            client.getJobExecutionResult().get(120, TimeUnit.SECONDS);
+            assertThat(client.getJobStatus().get()).isEqualTo(JobStatus.FINISHED);
             assertThat(table.snapshotManager().latestSnapshot().commitIdentifier())
                     .isEqualTo(Long.MAX_VALUE);
+            assertThat(readRowCount(table)).isEqualTo(2L);
         } finally {
+            if (!client.getJobStatus().get().isTerminalState()) {
+                client.cancel().get(30, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    @Timeout(value = 180, unit = TimeUnit.SECONDS)
+    @Test
+    public void testEarlyTerminalWriterWaitsForCoordinatorCommitAck() throws Exception {
+        String tableName = "T_COORDINATOR_EARLY_END_INPUT";
+        TableEnvironment tEnv =
+                TableEnvironment.create(
+                        EnvironmentSettings.newInstance().inStreamingMode().build());
+        tEnv.executeSql(
+                "CREATE CATALOG earlyendcat WITH ( 'type' = 'paimon', 'warehouse' = '"
+                        + tempPath
+                        + "' )");
+        tEnv.executeSql("USE CATALOG earlyendcat");
+        tEnv.executeSql(
+                "CREATE TABLE "
+                        + tableName
+                        + " (id INT, data STRING) WITH ("
+                        + "'bucket' = '-1', 'write-only' = 'true', "
+                        + "'sink.coordinator-commit.enabled' = 'true', "
+                        + "'commit.custom-listeners' = 'blocking-coordinator-commit')");
+        FileStoreTable table =
+                (FileStoreTable)
+                        ((FlinkCatalog) tEnv.getCatalog("earlyendcat").get())
+                                .catalog()
+                                .getTable(Identifier.create("default", tableName));
+
+        BlockingCommitListener.blockNextCommit();
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        env.setParallelism(SCRIPTED_PARALLELISM);
+        env.enableCheckpointing(200L);
+        DataStreamSource<RowData> source =
+                env.fromSource(
+                                new AsymmetricEndInputSource(),
+                                org.apache.flink.api.common.eventtime.WatermarkStrategy
+                                        .noWatermarks(),
+                                "coordinator-early-end-input-source")
+                        .setParallelism(SCRIPTED_PARALLELISM);
+        new FlinkSinkBuilder(table).forRowData(source).build();
+
+        JobClient client = env.executeAsync("coordinator-early-end-input");
+        try {
+            assertThat(BlockingCommitListener.awaitCommitStarted(30, TimeUnit.SECONDS)).isTrue();
+            // The commit call has entered, but retireAndPromote and its ACK are still blocked.
+            waitUntilWriterTasks(client, 0, SCRIPTED_PARALLELISM);
+            assertThat(client.getJobStatus().get()).isEqualTo(JobStatus.RUNNING);
+
+            BlockingCommitListener.releaseCommit();
+            waitUntilWriterTasks(client, 1, 1);
+            assertThat(client.getJobStatus().get()).isEqualTo(JobStatus.RUNNING);
+            waitUntilRowsCommitted(new RunningJob(table, client));
+            assertThat(readRowCount(table)).isEqualTo(1L);
+            assertThat(table.snapshotManager().latestSnapshot().commitIdentifier())
+                    .isLessThan(Long.MAX_VALUE);
+        } finally {
+            BlockingCommitListener.releaseCommit();
             if (!client.getJobStatus().get().isTerminalState()) {
                 client.cancel().get(30, TimeUnit.SECONDS);
             }
@@ -436,6 +508,28 @@ public class CoordinatorCommitITCase {
         return builder.toString();
     }
 
+    private void waitUntilWriterTasks(JobClient client, int finished, int running)
+            throws Exception {
+        RestClusterClient<?> clusterClient = MINI_CLUSTER_EXTENSION.createRestClusterClient();
+        long deadline = System.currentTimeMillis() + WAIT_TIMEOUT_MILLIS;
+        while (System.currentTimeMillis() < deadline) {
+            JobDetailsInfo details = clusterClient.getJobDetails(client.getJobID()).get();
+            Optional<JobDetailsInfo.JobVertexDetailsInfo> writer =
+                    details.getJobVertexInfos().stream()
+                            .filter(vertex -> vertex.getName().contains("Writer"))
+                            .findFirst();
+            if (writer.isPresent()) {
+                Map<ExecutionState, Integer> states = writer.get().getTasksPerState();
+                if (states.getOrDefault(ExecutionState.FINISHED, 0) == finished
+                        && states.getOrDefault(ExecutionState.RUNNING, 0) == running) {
+                    return;
+                }
+            }
+            Thread.sleep(200L);
+        }
+        throw new AssertionError("Writer tasks did not reach expected states");
+    }
+
     private long readRowCount(FileStoreTable table) throws Exception {
         RecordReader<InternalRow> reader =
                 table.newRead().createReader(table.newSnapshotReader().read());
@@ -476,6 +570,112 @@ public class CoordinatorCommitITCase {
 
         private void cancel() throws Exception {
             client.cancel().get(30, TimeUnit.SECONDS);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            while (!client.getJobStatus().get(5, TimeUnit.SECONDS).isTerminalState()) {
+                if (System.nanoTime() >= deadline) {
+                    throw new AssertionError("Canceled job did not reach a terminal state");
+                }
+                Thread.sleep(100L);
+            }
+        }
+    }
+
+    /** Ends subtask 0 while subtask 1 remains active for the assertion window. */
+    private static class AsymmetricEndInputSource extends AbstractNonCoordinatedSource<RowData> {
+
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        public Boundedness getBoundedness() {
+            return Boundedness.CONTINUOUS_UNBOUNDED;
+        }
+
+        @Override
+        public SourceReader<RowData, SimpleSourceSplit> createReader(
+                SourceReaderContext sourceReaderContext) {
+            return new Reader(sourceReaderContext.getIndexOfSubtask());
+        }
+
+        private static class Reader extends AbstractNonCoordinatedSourceReader<RowData> {
+
+            private final int subtask;
+            private boolean emitted;
+
+            private Reader(int subtask) {
+                this.subtask = subtask;
+            }
+
+            @Override
+            public InputStatus pollNext(ReaderOutput<RowData> output) throws InterruptedException {
+                if (subtask == 0 && !emitted) {
+                    output.collect(GenericRowData.of(0, StringData.fromString("early")));
+                    emitted = true;
+                    return InputStatus.MORE_AVAILABLE;
+                }
+                if (subtask == 0) {
+                    return InputStatus.END_OF_INPUT;
+                }
+                Thread.sleep(50L);
+                return InputStatus.MORE_AVAILABLE;
+            }
+        }
+    }
+
+    /**
+     * Test-only listener that delays coordinator ACK publication after the Paimon commit enters.
+     */
+    public static class BlockingCommitListener implements CommitListener {
+
+        private static volatile CountDownLatch commitStarted;
+        private static volatile CountDownLatch allowCommit;
+
+        static void blockNextCommit() {
+            commitStarted = new CountDownLatch(1);
+            allowCommit = new CountDownLatch(1);
+        }
+
+        static boolean awaitCommitStarted(long timeout, TimeUnit unit) throws InterruptedException {
+            return commitStarted.await(timeout, unit);
+        }
+
+        static void releaseCommit() {
+            if (allowCommit != null) {
+                allowCommit.countDown();
+            }
+        }
+
+        @Override
+        public void notifyCommittable(List<ManifestCommittable> committables) {
+            commitStarted.countDown();
+            try {
+                if (!allowCommit.await(60, TimeUnit.SECONDS)) {
+                    throw new RuntimeException("Timed out waiting to release coordinator commit");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(e);
+            }
+        }
+
+        @Override
+        public void snapshotState() {}
+
+        @Override
+        public void close() {}
+
+        /** Factory registered in the test service descriptor. */
+        public static class Factory implements CommitListenerFactory {
+
+            @Override
+            public String identifier() {
+                return "blocking-coordinator-commit";
+            }
+
+            @Override
+            public Optional<CommitListener> create(
+                    Committer.Context context, FileStoreTable table) {
+                return Optional.of(new BlockingCommitListener());
+            }
         }
     }
 

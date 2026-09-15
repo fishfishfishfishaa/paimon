@@ -50,6 +50,7 @@ import java.util.Set;
 import static org.apache.paimon.CoreOptions.PARTITION_MARK_DONE_WHEN_END_INPUT;
 import static org.apache.paimon.flink.FlinkConnectorOptions.PARTITION_IDLE_TIME_TO_DONE;
 import static org.apache.paimon.flink.FlinkConnectorOptions.PARTITION_MARK_DONE_MODE;
+import static org.apache.paimon.flink.FlinkConnectorOptions.SINK_COORDINATOR_COMMIT_ENABLED;
 
 /** Mark partition done. */
 public class PartitionMarkDoneListener implements CommitListener {
@@ -85,6 +86,17 @@ public class PartitionMarkDoneListener implements CommitListener {
 
         PartitionMarkDoneTrigger trigger =
                 PartitionMarkDoneTrigger.create(coreOptions, isRestored, stateStore);
+
+        if (isRestored
+                && options.get(PARTITION_MARK_DONE_MODE) == PartitionMarkDoneActionMode.WATERMARK
+                && !options.get(PARTITION_MARK_DONE_WHEN_END_INPUT)
+                && trigger.hasPendingPartitions()
+                && options.get(SINK_COORDINATOR_COMMIT_ENABLED)) {
+            throw new IllegalStateException(
+                    "Cannot recover coordinator-commit watermark partition mark-done with pending partitions: "
+                            + "per-partition watermarks are not persisted; configure partition.end-input-to-done=true "
+                            + "or disable partition mark-done before restarting.");
+        }
 
         List<PartitionMarkDoneAction> actions =
                 PartitionMarkDoneAction.createActions(cl, table, coreOptions);
@@ -148,6 +160,31 @@ public class PartitionMarkDoneListener implements CommitListener {
         }
     }
 
+    /** Restore bookkeeping from original committables, including filtered ordinary commits. */
+    void restoreTracking(List<ManifestCommittable> committables) {
+        if (partitionMarkDoneActionMode == PartitionMarkDoneActionMode.WATERMARK) {
+            extractPartitionWatermarks(committables)
+                    .f0
+                    .forEach(
+                            (row, watermark) ->
+                                    trigger.notifyPartition(
+                                            PartitionPathUtils.generatePartitionPath(
+                                                    partitionComputer.generatePartValues(row)),
+                                            watermark));
+        } else {
+            for (ManifestCommittable committable : committables) {
+                for (CommitMessage commitMessage : committable.fileCommittables()) {
+                    CommitMessageImpl message = (CommitMessageImpl) commitMessage;
+                    if (waitCompaction || !message.newFilesIncrement().isEmpty()) {
+                        trigger.notifyPartition(
+                                PartitionPathUtils.generatePartitionPath(
+                                        partitionComputer.generatePartValues(message.partition())));
+                    }
+                }
+            }
+        }
+    }
+
     private void markDoneByProcessTime(List<ManifestCommittable> committables) {
         Set<BinaryRow> partitions = new HashSet<>();
         boolean endInput = false;
@@ -179,6 +216,18 @@ public class PartitionMarkDoneListener implements CommitListener {
         boolean endInput = extractedWatermarks.f1;
         Optional<Long> latestWatermark = partitionWatermarks.values().stream().max(Long::compareTo);
 
+        if (endInput) {
+            // The global MAX is intentionally data-free. Its watermark applies to the
+            // already tracked partitions, not to synthetic file messages.
+            latestWatermark =
+                    committables.stream()
+                            .filter(
+                                    entry ->
+                                            entry.identifier() == Long.MAX_VALUE
+                                                    && entry.watermark() != null)
+                            .map(ManifestCommittable::watermark)
+                            .max(Long::compareTo);
+        }
         if (!latestWatermark.isPresent()) {
             LOG.warn("No watermark found in this batch of committables, skip partition mark done.");
             return;

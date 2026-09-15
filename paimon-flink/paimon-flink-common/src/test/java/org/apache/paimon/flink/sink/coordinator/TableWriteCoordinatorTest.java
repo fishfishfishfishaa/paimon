@@ -20,8 +20,12 @@ package org.apache.paimon.flink.sink.coordinator;
 
 import org.apache.paimon.CoreOptions;
 import org.apache.paimon.Snapshot;
+import org.apache.paimon.catalog.Catalog;
+import org.apache.paimon.catalog.CatalogContext;
+import org.apache.paimon.catalog.CatalogFactory;
 import org.apache.paimon.catalog.Identifier;
 import org.apache.paimon.data.GenericRow;
+import org.apache.paimon.disk.IOManagerImpl;
 import org.apache.paimon.flink.FlinkConnectorOptions;
 import org.apache.paimon.fs.Path;
 import org.apache.paimon.index.GlobalIndexMeta;
@@ -40,7 +44,9 @@ import org.apache.paimon.table.sink.CommitMessageImpl;
 import org.apache.paimon.table.sink.TableCommitImpl;
 import org.apache.paimon.types.DataTypes;
 import org.apache.paimon.utils.SegmentsCache;
+import org.apache.paimon.utils.TraceableFileIO;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -60,6 +66,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class TableWriteCoordinatorTest extends TableTestBase {
+
+    @Override
+    @BeforeEach
+    public void beforeEach() throws Catalog.DatabaseAlreadyExistException {
+        database = "default";
+        warehouse = new Path(TraceableFileIO.SCHEME + "://" + tempPath.toUri().getPath());
+        catalog = CatalogFactory.createCatalog(CatalogContext.create(warehouse));
+        catalog.createDatabase(database, true);
+        ioManager = new IOManagerImpl(tempPath.toString());
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {true, false})

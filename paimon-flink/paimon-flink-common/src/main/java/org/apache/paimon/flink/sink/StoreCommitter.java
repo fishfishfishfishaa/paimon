@@ -20,10 +20,12 @@ package org.apache.paimon.flink.sink;
 
 import org.apache.paimon.annotation.VisibleForTesting;
 import org.apache.paimon.disk.IOManager;
+import org.apache.paimon.flink.FlinkConnectorOptions;
 import org.apache.paimon.flink.metrics.FlinkMetricRegistry;
 import org.apache.paimon.flink.sink.listener.CommitListeners;
 import org.apache.paimon.io.DataFileMeta;
 import org.apache.paimon.manifest.ManifestCommittable;
+import org.apache.paimon.options.Options;
 import org.apache.paimon.table.BucketMode;
 import org.apache.paimon.table.FileStoreTable;
 import org.apache.paimon.table.sink.CommitMessage;
@@ -37,6 +39,8 @@ import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -49,9 +53,13 @@ public class StoreCommitter implements Committer<Committable, ManifestCommittabl
     private final CommitListeners commitListeners;
     @Nullable private final IOManager commitIOManager;
     private final boolean allowLogOffsetDuplicate;
+    private final boolean coordinatorCommit;
 
     public StoreCommitter(FileStoreTable table, TableCommit commit, Context context) {
         this.commit = (TableCommitImpl) commit;
+        this.coordinatorCommit =
+                new Options(table.options())
+                        .get(FlinkConnectorOptions.SINK_COORDINATOR_COMMIT_ENABLED);
 
         if (context.metricGroup() != null) {
             this.commit.withMetricRegistry(new FlinkMetricRegistry(context.metricGroup()));
@@ -119,6 +127,31 @@ public class StoreCommitter implements Committer<Committable, ManifestCommittabl
             List<ManifestCommittable> globalCommittables,
             boolean checkAppendFiles,
             boolean partitionMarkDoneRecoverFromState) {
+        if (coordinatorCommit) {
+            if (partitionMarkDoneRecoverFromState) {
+                commitListeners.restorePartitionTracking(globalCommittables);
+            }
+            List<ManifestCommittable> sorted = new ArrayList<>(globalCommittables);
+            sorted.sort(Comparator.comparingLong(ManifestCommittable::identifier));
+            List<ManifestCommittable> notify = new ArrayList<>();
+            int committed = 0;
+            for (ManifestCommittable entry : sorted) {
+                int count =
+                        commit.filterAndCommitMultiple(
+                                Collections.singletonList(entry), checkAppendFiles);
+                committed += count;
+                // Filtered ordinary data only rebuilds tracking. MAX must retry external
+                // finalization effects even when its snapshot was already published.
+                if (count > 0 || entry.identifier() == Long.MAX_VALUE) {
+                    notify.add(entry);
+                }
+            }
+            calcNumBytesAndRecordsOut(notify);
+            if (!notify.isEmpty()) {
+                commitListeners.notifyCommittable(notify, partitionMarkDoneRecoverFromState);
+            }
+            return committed;
+        }
         int committed = commit.filterAndCommitMultiple(globalCommittables, checkAppendFiles);
         // update bytes/records metrics for filter-and-commit path as well
         calcNumBytesAndRecordsOut(globalCommittables);
