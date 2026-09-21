@@ -133,7 +133,8 @@ public class RowAppendTableSink extends AppendTableSink<InternalRow> {
                     committerFactory,
                     streamingCheckpointEnabled,
                     initialCommitUser,
-                    autoTagForSavepoint ? createSavepointTaggerFactory(table) : null);
+                    autoTagForSavepoint ? createSavepointTaggerFactory(table) : null,
+                    new Options(table.options()).get(FlinkConnectorOptions.END_INPUT_WATERMARK));
         }
 
         /**
@@ -165,7 +166,7 @@ public class RowAppendTableSink extends AppendTableSink<InternalRow> {
             OperatorID operatorId = parameters.getStreamConfig().getOperatorID();
             OperatorEventGateway gateway =
                     parameters.getOperatorEventDispatcher().getOperatorEventGateway(operatorId);
-            return (T)
+            CoordinatorCommittingRowDataStoreWriteOperator operator =
                     new CoordinatorCommittingRowDataStoreWriteOperator(
                             parameters,
                             table,
@@ -173,6 +174,8 @@ public class RowAppendTableSink extends AppendTableSink<InternalRow> {
                             initialCommitUser,
                             gateway,
                             autoTagForSavepoint);
+            parameters.getOperatorEventDispatcher().registerEventHandler(operatorId, operator);
+            return (T) operator;
         }
 
         @Override

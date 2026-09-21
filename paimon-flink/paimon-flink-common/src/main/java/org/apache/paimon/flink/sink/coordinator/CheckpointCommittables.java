@@ -38,6 +38,7 @@ public class CheckpointCommittables {
     // Whether a savepoint tag should be created for the checkpoint that produced these
     // committables.
     private final boolean shouldCreateSavepointTag;
+    private final boolean terminal;
 
     public CheckpointCommittables(
             long checkpointId,
@@ -45,11 +46,22 @@ public class CheckpointCommittables {
             long watermark,
             boolean idle,
             boolean shouldCreateSavepointTag) {
+        this(checkpointId, committables, watermark, idle, shouldCreateSavepointTag, false);
+    }
+
+    public CheckpointCommittables(
+            long checkpointId,
+            List<Committable> committables,
+            long watermark,
+            boolean idle,
+            boolean shouldCreateSavepointTag,
+            boolean terminal) {
         this.checkpointId = checkpointId;
         this.committables = committables;
         this.watermark = watermark;
         this.idle = idle;
         this.shouldCreateSavepointTag = shouldCreateSavepointTag;
+        this.terminal = terminal;
     }
 
     // Convenience for callers that are not savepoint-aware yet.
@@ -80,6 +92,11 @@ public class CheckpointCommittables {
         return idle;
     }
 
+    /** True only after this checkpoint captured a fully sealed writer tail. */
+    public boolean terminal() {
+        return terminal;
+    }
+
     public boolean shouldCreateSavepointTag() {
         return shouldCreateSavepointTag;
     }
@@ -87,7 +104,7 @@ public class CheckpointCommittables {
     /** Returns a copy with the savepoint-tag intent set; all other fields preserved. */
     public CheckpointCommittables withShouldCreateSavepointTag(boolean shouldCreateSavepointTag) {
         return new CheckpointCommittables(
-                checkpointId, committables, watermark, idle, shouldCreateSavepointTag);
+                checkpointId, committables, watermark, idle, shouldCreateSavepointTag, terminal);
     }
 
     public int size() {
@@ -101,7 +118,7 @@ public class CheckpointCommittables {
     @Override
     public String toString() {
         return String.format(
-                "CheckpointCommittables{checkpointId=%d, watermark=%d, idle=%s, shouldCreateSavepointTag=%s, committables=%s}",
-                checkpointId, watermark, idle, shouldCreateSavepointTag, committables);
+                "CheckpointCommittables{checkpointId=%d, watermark=%d, idle=%s, shouldCreateSavepointTag=%s, terminal=%s, committables=%s}",
+                checkpointId, watermark, idle, shouldCreateSavepointTag, terminal, committables);
     }
 }
