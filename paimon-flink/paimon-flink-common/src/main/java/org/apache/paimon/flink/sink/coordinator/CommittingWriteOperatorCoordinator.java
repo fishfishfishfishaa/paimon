@@ -938,7 +938,6 @@ public class CommittingWriteOperatorCoordinator implements OperatorCoordinator {
         @Nullable private final SavepointTagger.Factory savepointTaggerFactory;
         private final Long endInputWatermark;
 
-
         public Provider(
                 OperatorID operatorId,
                 Committer.Factory<Committable, ManifestCommittable> committerFactory,

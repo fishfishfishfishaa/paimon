@@ -63,7 +63,12 @@ public class CheckpointCommittablesSerializerTest {
         for (boolean savepoint : new boolean[] {true, false}) {
             CheckpointCommittables original =
                     new CheckpointCommittables(
-                            42L, Collections.emptyList(), /* watermark */ 4242L, false, savepoint, false);
+                            42L,
+                            Collections.emptyList(), /* watermark */
+                            4242L,
+                            false,
+                            savepoint,
+                            false);
             CheckpointCommittables decoded =
                     serializer.deserialize(serializer.getVersion(), serializer.serialize(original));
             assertThat(decoded.checkpointId()).isEqualTo(42L);
