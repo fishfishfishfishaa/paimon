@@ -37,6 +37,72 @@ from pypaimon.write.writer.append_only_data_writer import AppendOnlyDataWriter
 
 
 class TableWriteTest(unittest.TestCase):
+    def test_large_string_compatibility_rejects_other_type_changes(self):
+        writer = object.__new__(TableWrite)
+        writer.file_store_write = Mock(write_cols=None)
+        writer.table_pyarrow_schema = pa.schema([
+            ('id', pa.int32()),
+            ('nested', pa.struct([pa.field('text', pa.string(), nullable=False)])),
+        ])
+        valid = pa.schema([
+            ('id', pa.int32()),
+            ('nested', pa.struct([pa.field('text', pa.large_string(), nullable=False)])),
+        ])
+        writer._validate_pyarrow_schema(valid)
+        invalid = [
+            valid.set(0, pa.field('id', pa.int64())),
+            pa.schema(list(reversed(list(valid)))),
+            valid.set(1, pa.field('nested', pa.struct([
+                pa.field('text', pa.large_string(), nullable=True)]))),
+            valid.set(1, pa.field('nested', pa.struct([
+                pa.field('renamed', pa.large_string(), nullable=False)]))),
+        ]
+        for schema in invalid:
+            with self.subTest(schema=schema):
+                with self.assertRaisesRegex(ValueError, 'consistent'):
+                    writer._validate_pyarrow_schema(schema)
+
+    @parameterized.expand([('append', False, '-1'), ('primary', True, '1'), ('postpone', True, '-2')])
+    def test_large_string_input_roundtrip(self, mode, primary_key, bucket):
+        name = 'default.large_strings_' + mode
+
+        def arrow_schema(string_type):
+            return pa.schema([
+                pa.field('id', pa.int64(), nullable=False),
+                pa.field('text', string_type),
+                pa.field('nested', pa.struct([
+                    pa.field('labels', pa.list_(string_type)),
+                    pa.field('mapping', pa.map_(string_type, string_type)),
+                ])),
+            ])
+
+        self.catalog.create_table(name, Schema.from_pyarrow_schema(
+            arrow_schema(pa.large_string()),
+            primary_keys=['id'] if primary_key else [],
+            options={'bucket': bucket},
+        ), False)
+        table = self.catalog.get_table(name)
+        builder = (table.new_postpone_fixed_bucket_write_builder()
+                   if mode == 'postpone' else table.new_batch_write_builder())
+        write, commit = builder.new_write(), builder.new_commit()
+        expected = []
+        try:
+            for index, (dtype, text) in enumerate([
+                    (pa.string(), '抓笔'), (pa.large_string(), ''),
+                    (pa.string(), None), (pa.large_string(), 'x' * 100)]):
+                row = {'id': index, 'text': text, 'nested': {
+                    'labels': [text, None], 'mapping': [('任务', text)],
+                }}
+                expected.append(row)
+                write.write_arrow(pa.Table.from_pylist([row], schema=arrow_schema(dtype)))
+            commit.commit(write.prepare_commit())
+        finally:
+            write.close()
+            commit.close()
+        actual = self._read_sorted(table, [('id', 'ascending')])
+        self.assertEqual(actual.to_pylist(), expected)
+        self.assertEqual(actual.schema.remove_metadata(), arrow_schema(pa.string()))
+
     @classmethod
     def setUpClass(cls):
         cls.tempdir = tempfile.mkdtemp()
@@ -575,14 +641,33 @@ class TableWriteTest(unittest.TestCase):
         actual = table_read.to_arrow(splits).sort_by('user_id')
         self.assertEqual(self.expected, actual)
 
-    def test_commit_minor_compacts_manifest_files(self):
+    @parameterized.expand([
+        ('default', None, None, True),
+        ('not_write_only_default', 'false', None, True),
+        ('write_only_default', 'true', None, True),
+        ('skip_enabled', None, 'true', True),
+        ('not_write_only_skip_enabled', 'false', 'true', True),
+        ('write_only_skip_enabled', 'true', 'true', False),
+        ('skip_disabled', None, 'false', True),
+        ('not_write_only_skip_disabled', 'false', 'false', True),
+        ('write_only_skip_disabled', 'true', 'false', True),
+    ])
+    def test_commit_manifest_merge(self, name, write_only, skip_on_write_only, merge_enabled):
+        options = {'manifest.merge-min-count': '2'}
+        if write_only is not None:
+            options['write-only'] = write_only
+        if skip_on_write_only is not None:
+            options['manifest.merge.skip-on-write-only'] = skip_on_write_only
         schema = Schema.from_pyarrow_schema(
             self.pa_schema,
             partition_keys=['dt'],
-            options={'manifest.merge-min-count': '2'},
+            options=options,
         )
-        self.catalog.create_table('default.test_minor_manifest_compaction', schema, False)
-        table = self.catalog.get_table('default.test_minor_manifest_compaction')
+        identifier = 'default.test_manifest_merge_' + name
+        self.catalog.create_table(identifier, schema, False)
+        table = self.catalog.get_table(identifier)
+        manifest_list_manager = ManifestListManager(table)
+        previous_manifests = []
 
         expected_data = {
             'user_id': [],
@@ -607,15 +692,24 @@ class TableWriteTest(unittest.TestCase):
             table_commit.commit(table_write.prepare_commit())
             table_write.close()
             table_commit.close()
+            if i == 1:
+                previous_manifests = manifest_list_manager.read_all(
+                    table.snapshot_manager().get_latest_snapshot())
 
         snapshot = table.snapshot_manager().get_latest_snapshot()
-        manifest_list_manager = ManifestListManager(table)
         base_manifests = manifest_list_manager.read(snapshot.base_manifest_list)
         delta_manifests = manifest_list_manager.read(snapshot.delta_manifest_list)
 
-        self.assertEqual(len(base_manifests), 1)
-        self.assertEqual(base_manifests[0].num_added_files, 2)
-        self.assertEqual(base_manifests[0].num_deleted_files, 0)
+        if merge_enabled:
+            self.assertEqual(len(base_manifests), 1)
+            self.assertEqual(base_manifests[0].num_added_files, 2)
+            self.assertEqual(base_manifests[0].num_deleted_files, 0)
+        else:
+            self.assertEqual(len(base_manifests), 2)
+            self.assertEqual(
+                [manifest.file_name for manifest in previous_manifests],
+                [manifest.file_name for manifest in base_manifests],
+            )
         self.assertEqual(len(delta_manifests), 1)
 
         expected = pa.Table.from_pydict(expected_data, schema=self.pa_schema)
@@ -1958,9 +2052,9 @@ class TableWriteTest(unittest.TestCase):
         )
         writer.write(big_batch)
 
-        pending_rows = writer.pending_data.num_rows if writer.pending_data is not None else 0
+        pending_rows = writer.pending_row_count
         committed_rows = sum(f.row_count for f in writer.committed_files)
         self.assertEqual(committed_rows + pending_rows, num_rows)
         self.assertGreater(len(writer.committed_files), 0)
-        if writer.pending_data is not None:
-            self.assertLessEqual(writer.pending_data.nbytes, target)
+        if pending_rows > 0:
+            self.assertLessEqual(writer._buffer.materialize().nbytes, target)
